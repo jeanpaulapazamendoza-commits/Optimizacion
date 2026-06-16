@@ -1,0 +1,15 @@
+streamlit
+pandas
+numpy
+scikit-learn
+plotly
+openpyxl
+scipy
+openrouteservice
+ortools
+requests
+folium
+streamlit-folium
+qrcode
+gspread
+google-auth
