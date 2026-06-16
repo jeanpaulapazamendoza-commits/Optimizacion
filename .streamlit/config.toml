@@ -1,0 +1,26 @@
+# ===========================================================
+# TEMA VISUAL — "planner" (inspirado en paneles logísticos pro)
+# Paleta: ámbar #F2A33C · azul pizarra #16263E · fondo #F4F6F9
+# ===========================================================
+
+[theme]
+base = "light"
+primaryColor = "#F2A33C"
+backgroundColor = "#F4F6F9"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#243342"
+linkColor = "#C77E10"
+borderColor = "#E3E8EF"
+showWidgetBorder = true
+baseRadius = "10px"
+font = "Inter, 'Segoe UI', sans-serif"
+headingFont = "Inter, 'Segoe UI', sans-serif"
+
+# Sidebar oscuro (panel de control) con su propio juego de colores
+[theme.sidebar]
+backgroundColor = "#16263E"
+secondaryBackgroundColor = "#22375A"
+textColor = "#E8EEF6"
+borderColor = "#31486B"
+primaryColor = "#F2A33C"
+linkColor = "#F6C35C"
