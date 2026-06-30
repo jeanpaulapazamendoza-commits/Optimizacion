@@ -67,6 +67,19 @@ try:
 except ImportError:
     GSHEETS_DISPONIBLE = False
 
+try:
+    import streamlit_authenticator as stauth
+    AUTH_DISPONIBLE = True
+except ImportError:
+    AUTH_DISPONIBLE = False
+
+# Módulo local: conversor de direcciones ↔ coordenadas (ver conversor.py).
+try:
+    from conversor import render_conversor
+    CONVERSOR_DISPONIBLE = True
+except Exception:
+    CONVERSOR_DISPONIBLE = False
+
 st.set_page_config(
     page_title="RuteoTiendas Planner — Ruteo óptimo de despacho",
     page_icon="🏪",
@@ -182,6 +195,56 @@ a.rt-pill:hover { background: rgba(242,163,60,.25); border-color: #F2A33C; color
 """
 st.markdown(ESTILO_CSS, unsafe_allow_html=True)
 
+# ===========================================================
+# AUTENTICACIÓN (opcional) — login con usuario/contraseña
+# Si NO existe la sección [auth] en los secrets, la app queda abierta
+# (no bloquea a nadie hasta que decidas configurarlo). Ver SETUP_LOGIN.md.
+# ===========================================================
+def _a_dict_plano(obj):
+    """st.secrets devuelve objetos de solo-lectura y anidados; los pasamos a
+    dict mutable porque streamlit-authenticator modifica las credenciales."""
+    if hasattr(obj, "items"):
+        return {k: _a_dict_plano(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_a_dict_plano(v) for v in obj]
+    return obj
+
+
+usuario_actual = "anónimo"
+auth_activo = False
+try:
+    _auth_cfg = st.secrets.get("auth", None)
+except Exception:
+    _auth_cfg = None
+
+if AUTH_DISPONIBLE and _auth_cfg and _auth_cfg.get("credentials"):
+    cfg = _a_dict_plano(_auth_cfg)
+    authenticator = stauth.Authenticate(
+        cfg["credentials"],
+        cfg.get("cookie_name", "ruteo_auth"),
+        cfg.get("cookie_key", "ruteo_cookie_key_cambia_esto"),
+        float(cfg.get("cookie_expiry_days", 30)),
+    )
+    authenticator.login(location="main", fields={
+        "Form name": "🔒 Iniciar sesión — RuteoTiendas Planner",
+        "Username": "Usuario", "Password": "Contraseña", "Login": "Entrar"})
+    _estado = st.session_state.get("authentication_status")
+    if _estado is False:
+        st.error("❌ Usuario o contraseña incorrectos. Intenta de nuevo.")
+        st.stop()
+    if _estado is None:
+        st.info("🔒 Esta herramienta es privada. Ingresa tus credenciales para continuar.")
+        st.stop()
+    auth_activo = True
+    usuario_actual = (st.session_state.get("name")
+                      or st.session_state.get("username") or "usuario")
+    authenticator.logout("🚪 Cerrar sesión", "sidebar", key="logout_btn")
+    st.sidebar.caption(f"👤 Sesión activa: **{usuario_actual}**")
+    st.sidebar.markdown("---")
+elif _auth_cfg and not AUTH_DISPONIBLE:
+    st.warning("⚠️ Configuraste `[auth]` en los secrets pero falta la librería "
+               "`streamlit-authenticator` en requirements.txt.")
+
 NOMBRE_ALUMNO = "Jean Paul Apaza mendoza"
 CODIGO_ISIL = "cuenta.appseet01@gmail.com"
 URL_COLAB = "https://colab.research.google.com/drive/1HRFy03Da-KP6zSfyX6XSwvqeqqeaDUPP?usp=sharing"
@@ -192,6 +255,26 @@ VEL_PROMEDIO_KMH = 25           # velocidad urbana asumida para estimar duració
 OSRM_BASE = "https://router.project-osrm.org"
 OSRM_MAX_PUNTOS = 100           # límite del servidor público de OSRM por request
 ORS_MAX_JOBS = 50               # límite del plan gratuito de ORS (optimization)
+
+# ===========================================================
+# NAVEGACIÓN — Ruteo  /  Conversor direcciones ↔ coordenadas
+# Selector tipo pestañas arriba. Con st.stop() en el modo Conversor evitamos
+# ejecutar todo el pipeline de ruteo cuando no se necesita.
+# ===========================================================
+_NAV_RUTEO = "🚛 Ruteo y clustering"
+_NAV_CONV = "🌎 Conversor direcciones ↔ coordenadas"
+if CONVERSOR_DISPONIBLE:
+    _opciones_nav = [_NAV_RUTEO, _NAV_CONV]
+    try:
+        _nav = st.segmented_control(
+            "Navegación", _opciones_nav, default=_NAV_RUTEO,
+            label_visibility="collapsed")
+    except Exception:
+        _nav = st.radio("Navegación", _opciones_nav, horizontal=True,
+                        label_visibility="collapsed")
+    if _nav == _NAV_CONV:
+        render_conversor()
+        st.stop()
 
 # ===========================================================
 # FUNCIONES — GEOGRAFÍA
@@ -360,6 +443,9 @@ PARADAS_HEADERS = ["id_parada", "id_ruta", "orden", "codigo_sucursal", "tienda",
                    "distrito", "bultos", "prioridad", "eta", "ventana", "ubicacion",
                    "latitud", "longitud", "link_waze", "estado_entrega",
                    "hora_entrega", "foto_entrega", "gps_entrega", "observaciones"]
+HISTORIAL_HEADERS = ["id_despacho", "fecha", "hora", "creado_por", "modo", "criterio",
+                     "rutas", "tiendas", "bultos", "km_total", "duracion_min_total",
+                     "costo_total", "motor", "sin_asignar"]
 
 
 def leer_secret(clave, defecto=""):
@@ -400,6 +486,19 @@ def asegurar_pestana(libro, nombre, encabezados):
     if not ws.row_values(1):
         ws.append_row(encabezados, value_input_option="USER_ENTERED")
     return ws
+
+
+@st.cache_data(ttl=120, show_spinner="Leyendo historial de Google Sheets...")
+def leer_pestana(url_o_id, nombre):
+    """Lee una pestaña de la hoja y la devuelve como DataFrame (caché 2 min).
+    Devuelve DataFrame vacío si la pestaña no existe todavía."""
+    gc = conectar_gsheets()
+    libro = gc.open_by_key(extraer_id_hoja(url_o_id))
+    try:
+        ws = libro.worksheet(nombre)
+    except gspread.WorksheetNotFound:
+        return pd.DataFrame()
+    return pd.DataFrame(ws.get_all_records())
 
 
 # ===========================================================
@@ -1198,6 +1297,49 @@ with st.expander("📋 Descripción del problema y modelo", expanded=False):
        (se resuelve localmente, sin límites de API). Las distancias pueden ser por
        **calles reales (OSRM, gratis)** o en **línea recta (haversine)**.
     """)
+
+# ===========================================================
+# HISTORIAL DE DESPACHOS (lee la pestaña Historial de Google Sheets)
+# ===========================================================
+with st.expander("📅 Historial de despachos", expanded=False):
+    _url_hist = leer_secret("gsheets_url", "")
+    _tiene_cred = bool(GSHEETS_DISPONIBLE
+                       and leer_secret("gcp_service_account", {}) not in (None, {}))
+    if not _tiene_cred or not _url_hist:
+        st.caption("Conecta tu Google Sheet (sección 📤 *Asignar rutas* y guía "
+                   "SETUP_APPSHEET.md) para guardar y consultar aquí cada despacho "
+                   "enviado, con su fecha, autor, km, bultos y costo.")
+    else:
+        c_h1, c_h2 = st.columns([1, 3])
+        if c_h1.button("🔄 Cargar / actualizar historial", use_container_width=True):
+            st.session_state.ver_historial = True
+            leer_pestana.clear()
+        if st.session_state.get("ver_historial"):
+            try:
+                df_hist = leer_pestana(_url_hist, "Historial")
+            except Exception as e:
+                df_hist = pd.DataFrame()
+                st.error(f"No se pudo leer el historial: {type(e).__name__}: {e}")
+            if df_hist.empty:
+                st.info("Aún no hay despachos registrados. Envía uno desde la sección "
+                        "📤 *Asignar rutas → Google Sheets* y aparecerá aquí.")
+            else:
+                df_hist = df_hist.iloc[::-1].reset_index(drop=True)  # más reciente primero
+                fechas = ["(todas)"] + sorted(
+                    [f for f in df_hist.get("fecha", pd.Series()).astype(str).unique() if f],
+                    reverse=True)
+                f_sel = c_h2.selectbox("Filtrar por fecha:", fechas, key="hist_fecha")
+                vista = df_hist if f_sel == "(todas)" else df_hist[df_hist["fecha"].astype(str) == f_sel]
+                tot_desp = len(vista)
+                tot_km = pd.to_numeric(vista.get("km_total"), errors="coerce").sum()
+                tot_bultos = pd.to_numeric(vista.get("bultos"), errors="coerce").sum()
+                st.caption(f"📦 {tot_desp} despachos · {int(tot_bultos):,} bultos · "
+                           f"{tot_km:,.1f} km acumulados")
+                st.dataframe(vista, use_container_width=True, hide_index=True, height=300)
+                st.download_button(
+                    "⬇️ Descargar historial (CSV)",
+                    data=vista.to_csv(index=False).encode("utf-8"),
+                    file_name="historial_despachos.csv", mime="text/csv")
 
 # ===========================================================
 # SIDEBAR — AGRUPAMIENTO
@@ -2487,9 +2629,25 @@ if rutas_validas:
                             ])
                     ws_rutas.append_rows(filas_rutas, value_input_option="USER_ENTERED")
                     ws_paradas.append_rows(filas_paradas, value_input_option="USER_ENTERED")
+
+                    # Registro en el HISTORIAL (una fila por despacho)
+                    ws_hist = asegurar_pestana(libro, "Historial", HISTORIAL_HEADERS)
+                    km_tot_h = round(sum(r["distance_km"]
+                                         for r in st.session_state.rutas_calculadas.values()), 2)
+                    dur_tot_h = round(sum(r["duration_min"]
+                                          for r in st.session_state.rutas_calculadas.values()), 1)
+                    costo_tot_h = (round(len(filas_rutas) * costo_fijo + km_tot_h * costo_km, 2)
+                                   if hay_costos else "")
+                    ws_hist.append_row([
+                        id_despacho, fecha_hoy, _dt.datetime.now().strftime("%H:%M"),
+                        usuario_actual, modo_cluster, criterio_cap, len(filas_rutas),
+                        int(sum(r[12] for r in filas_rutas)),
+                        int(sum(r[13] for r in filas_rutas)),
+                        km_tot_h, dur_tot_h, costo_tot_h, motor_ruteo, int(n_no_asignadas),
+                    ], value_input_option="USER_ENTERED")
                 st.success(f"✅ Despacho **{id_despacho}** enviado: {len(filas_rutas)} rutas "
-                           f"y {len(filas_paradas)} paradas. Ya está disponible en tu app "
-                           f"de AppSheet.")
+                           f"y {len(filas_paradas)} paradas. Registrado en el historial "
+                           f"por **{usuario_actual}**. Ya está disponible en tu app de AppSheet.")
                 st.markdown(f"[📗 Abrir la hoja de Google Sheets]({url_hoja})")
             except KeyError:
                 st.error("🔐 No encontré `[gcp_service_account]` en los secrets de "

@@ -44,6 +44,13 @@ Aplicación web en **Streamlit** que:
     grupos y un **🤖 Auto-asignar puntos libres** que agrupa automáticamente lo que dejes
     sin seleccionar (flujo híbrido manual + automático). El resultado alimenta el mismo
     ruteo, hojas de ruta y envío a Google Sheets.
+15. **Inicio de sesión** (opcional): protege la app con usuario/contraseña
+    (multi-usuario, sesión recordada por cookie). Se activa al agregar la sección
+    `[auth]` en los *secrets*; si no la configuras, la app sigue abierta. Ver **SETUP_LOGIN.md**.
+16. **Historial de despachos**: cada envío a Google Sheets queda registrado en una
+    pestaña `Historial` (fecha, **autor**, rutas, tiendas, bultos, km, costo). El panel
+    **📅 Historial de despachos** permite consultarlo, filtrar por fecha y exportar a CSV —
+    persiste entre sesiones porque vive en tu Google Sheet.
 
 ## 📑 Formato del archivo (Excel o CSV)
 

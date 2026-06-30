@@ -13,3 +13,4 @@ streamlit-folium
 qrcode
 gspread
 google-auth
+streamlit-authenticator
