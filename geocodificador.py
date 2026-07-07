@@ -186,9 +186,14 @@ def es_coordenada(texto: str) -> Optional[tuple[float, float]]:
     return None
 
 
-def _resolver_proveedor(proveedor: str, api_key: Optional[str]) -> str:
+def _resolver_proveedor(proveedor: str, api_key: Optional[str],
+                        apps_script_url: Optional[str] = None) -> str:
     if proveedor == "auto":
-        return "google" if api_key else "nominatim"
+        if api_key:
+            return "google"
+        if apps_script_url:
+            return "apps_script"
+        return "nominatim"
     return proveedor
 
 
@@ -342,11 +347,73 @@ def _reverse_google(lat: float, lon: float, api_key: str, idioma: str) -> GeoRes
 
 
 # ---------------------------------------------------------------------------
+# Proveedor: Google vía Apps Script (Web App)
+# Reusa Maps.newGeocoder() de Google Apps Script (gratis, SIN API key ni
+# facturación). El usuario despliega el .gs como Web App con acceso "Cualquiera"
+# y pega la URL /exec. La respuesta tiene el mismo formato que la Google
+# Geocoding API, así que se reutiliza _resultado_google().
+# ---------------------------------------------------------------------------
+
+#: Apps Script puede tardar en responder (arranque en frío del despliegue).
+APPS_SCRIPT_TIMEOUT = 25
+
+
+def _apps_script_get(url: str, params: dict) -> dict:
+    try:
+        r = requests.get(url, params=params, timeout=APPS_SCRIPT_TIMEOUT)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise GeoError(f"Apps Script: fallo de red ({e})") from e
+    try:
+        data = r.json()
+    except ValueError:
+        raise GeoError(
+            "Apps Script: la respuesta no es JSON. Verifica que la Web App esté "
+            "desplegada con acceso «Cualquiera» y que la URL termine en /exec.")
+    estado = data.get("status")
+    if estado == "OK":
+        return data
+    if estado == "ZERO_RESULTS":
+        raise GeoError("Google (Apps Script): sin resultados")
+    raise GeoError(f"Apps Script: {data.get('error_message', estado or 'error')}")
+
+
+def _geocode_apps_script(consulta: str, url: str, token: Optional[str],
+                         idioma: str, pais: Optional[str]) -> GeoResultado:
+    params = {"q": consulta, "mode": "geocode"}
+    if token:
+        params["token"] = token
+    if idioma:
+        params["lang"] = idioma
+    if pais:
+        params["region"] = pais
+    data = _apps_script_get(url, params)
+    res = _resultado_google(data["results"][0])
+    res.proveedor = "apps_script"
+    return res
+
+
+def _reverse_apps_script(lat: float, lon: float, url: str, token: Optional[str],
+                         idioma: str) -> GeoResultado:
+    params = {"q": f"{lat},{lon}", "mode": "reverse"}
+    if token:
+        params["token"] = token
+    if idioma:
+        params["lang"] = idioma
+    data = _apps_script_get(url, params)
+    res = _resultado_google(data["results"][0])
+    res.proveedor = "apps_script"
+    return res
+
+
+# ---------------------------------------------------------------------------
 # API pública
 # ---------------------------------------------------------------------------
 
 def geocode(consulta: str, proveedor: str = "auto", api_key: Optional[str] = None,
             idioma: str = "es", pais: Optional[str] = None,
+            apps_script_url: Optional[str] = None,
+            apps_script_token: Optional[str] = None,
             usar_cache: bool = True) -> GeoResultado:
     """Dirección -> coordenadas.
 
@@ -356,10 +423,13 @@ def geocode(consulta: str, proveedor: str = "auto", api_key: Optional[str] = Non
     Parameters
     ----------
     consulta : dirección, código postal o ``"lat, lon"``.
-    proveedor : ``"auto"`` | ``"nominatim"`` | ``"google"``.
+    proveedor : ``"auto"`` | ``"nominatim"`` | ``"google"`` | ``"apps_script"``.
     api_key : clave de Google (necesaria para el proveedor ``google``).
     idioma : idioma de la respuesta (ISO, p.ej. ``"es"``).
     pais : sesgo/filtro por país (ISO-2, p.ej. ``"pe"``) para mayor precisión.
+    apps_script_url : URL /exec de la Web App de Apps Script (proveedor ``apps_script``,
+        geocodificación de Google gratis sin API key).
+    apps_script_token : token opcional si la Web App lo exige.
     """
     coords = es_coordenada(consulta)
     if coords is not None:
@@ -367,7 +437,7 @@ def geocode(consulta: str, proveedor: str = "auto", api_key: Optional[str] = Non
         return GeoResultado(lat=lat, lon=lon, direccion=consulta.strip(),
                             proveedor="passthrough")
 
-    prov = _resolver_proveedor(proveedor, api_key)
+    prov = _resolver_proveedor(proveedor, api_key, apps_script_url)
     clave = _CacheTTL.clave("geocode", prov, consulta, idioma, pais or "")
     if usar_cache and (cacheado := _cache.get(clave)) is not None:
         return GeoResultado(**cacheado)
@@ -376,6 +446,11 @@ def geocode(consulta: str, proveedor: str = "auto", api_key: Optional[str] = Non
         if not api_key:
             raise GeoError("El proveedor 'google' requiere api_key.")
         res = _geocode_google(consulta, api_key, idioma, pais)
+    elif prov == "apps_script":
+        if not apps_script_url:
+            raise GeoError("El proveedor 'apps_script' requiere apps_script_url.")
+        res = _geocode_apps_script(consulta, apps_script_url, apps_script_token,
+                                   idioma, pais)
     elif prov == "nominatim":
         res = _geocode_nominatim(consulta, idioma, pais)
     else:
@@ -388,6 +463,8 @@ def geocode(consulta: str, proveedor: str = "auto", api_key: Optional[str] = Non
 
 def reverse_geocode(lat, lon: Optional[float] = None, proveedor: str = "auto",
                     api_key: Optional[str] = None, idioma: str = "es",
+                    apps_script_url: Optional[str] = None,
+                    apps_script_token: Optional[str] = None,
                     usar_cache: bool = True) -> GeoResultado:
     """Coordenadas -> dirección.
 
@@ -400,7 +477,7 @@ def reverse_geocode(lat, lon: Optional[float] = None, proveedor: str = "auto",
         lat, lon = coords
     lat, lon = float(lat), float(lon)
 
-    prov = _resolver_proveedor(proveedor, api_key)
+    prov = _resolver_proveedor(proveedor, api_key, apps_script_url)
     clave = _CacheTTL.clave("reverse", prov, round(lat, 6), round(lon, 6), idioma)
     if usar_cache and (cacheado := _cache.get(clave)) is not None:
         return GeoResultado(**cacheado)
@@ -409,6 +486,10 @@ def reverse_geocode(lat, lon: Optional[float] = None, proveedor: str = "auto",
         if not api_key:
             raise GeoError("El proveedor 'google' requiere api_key.")
         res = _reverse_google(lat, lon, api_key, idioma)
+    elif prov == "apps_script":
+        if not apps_script_url:
+            raise GeoError("El proveedor 'apps_script' requiere apps_script_url.")
+        res = _reverse_apps_script(lat, lon, apps_script_url, apps_script_token, idioma)
     elif prov == "nominatim":
         res = _reverse_nominatim(lat, lon, idioma)
     else:
@@ -421,7 +502,8 @@ def reverse_geocode(lat, lon: Optional[float] = None, proveedor: str = "auto",
 
 def geocode_lote(consultas: Iterable[str], proveedor: str = "auto",
                  api_key: Optional[str] = None, idioma: str = "es",
-                 pais: Optional[str] = None,
+                 pais: Optional[str] = None, apps_script_url: Optional[str] = None,
+                 apps_script_token: Optional[str] = None,
                  on_error: str = "none") -> list[Optional[GeoResultado]]:
     """Geocodifica una lista de direcciones (ideal para un CSV de clientes).
 
@@ -431,7 +513,8 @@ def geocode_lote(consultas: Iterable[str], proveedor: str = "auto",
     salida: list[Optional[GeoResultado]] = []
     for c in consultas:
         try:
-            salida.append(geocode(c, proveedor, api_key, idioma, pais))
+            salida.append(geocode(c, proveedor, api_key, idioma, pais,
+                                  apps_script_url, apps_script_token))
         except GeoError:
             if on_error == "raise":
                 raise
@@ -472,8 +555,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Geocodificador dirección <-> coordenadas")
     p.add_argument("consulta", help='Dirección o "lat, lon"')
     p.add_argument("--reverse", action="store_true", help="Forzar coordenadas -> dirección")
-    p.add_argument("--proveedor", default="auto", choices=["auto", "nominatim", "google"])
+    p.add_argument("--proveedor", default="auto",
+                   choices=["auto", "nominatim", "google", "apps_script"])
     p.add_argument("--api-key", default=None)
+    p.add_argument("--apps-script-url", default=None, help="URL /exec de la Web App")
+    p.add_argument("--apps-script-token", default=None)
     p.add_argument("--pais", default=None, help="ISO-2, p.ej. pe")
     p.add_argument("--idioma", default="es")
     args = p.parse_args()
@@ -481,10 +567,14 @@ if __name__ == "__main__":
     try:
         if args.reverse or es_coordenada(args.consulta):
             r = reverse_geocode(args.consulta, proveedor=args.proveedor,
-                                api_key=args.api_key, idioma=args.idioma)
+                                api_key=args.api_key, idioma=args.idioma,
+                                apps_script_url=args.apps_script_url,
+                                apps_script_token=args.apps_script_token)
         else:
             r = geocode(args.consulta, proveedor=args.proveedor, api_key=args.api_key,
-                        idioma=args.idioma, pais=args.pais)
+                        idioma=args.idioma, pais=args.pais,
+                        apps_script_url=args.apps_script_url,
+                        apps_script_token=args.apps_script_token)
         print(json.dumps(r.to_dict(), ensure_ascii=False, indent=2))
     except GeoError as e:
         print(f"ERROR: {e}", file=sys.stderr)

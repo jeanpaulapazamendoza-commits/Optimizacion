@@ -306,11 +306,13 @@ def render_conversor():
     with st.sidebar:
         st.header("⚙️ Conversor — proveedor")
         proveedor = st.radio(
-            "Servicio de geocodificación", ["nominatim", "google"],
-            format_func=lambda p: {"nominatim": "Nominatim (gratis)",
-                                   "google": "Google Maps (API key)"}[p],
+            "Servicio de geocodificación", ["nominatim", "apps_script", "google"],
+            format_func=lambda p: {
+                "nominatim": "Nominatim (gratis)",
+                "apps_script": "Google vía Apps Script (gratis) ⭐",
+                "google": "Google Maps (API key)"}[p],
             key="conv_prov")
-        api_key = None
+        api_key = apps_script_url = apps_script_token = None
         if proveedor == "google":
             api_key = st.text_input(
                 "Google API key", type="password", key="conv_apikey",
@@ -319,11 +321,24 @@ def render_conversor():
                 st.info("Pega tu API key para usar Google. Mientras tanto se usa "
                         "Nominatim.")
                 proveedor = "nominatim"
+        elif proveedor == "apps_script":
+            apps_script_url = st.text_input(
+                "URL de la Web App (/exec)", key="conv_gs_url",
+                help="Despliega apps_script_web_app.gs como Web App con acceso "
+                     "«Cualquiera» y pega la URL que termina en /exec. Precisión de "
+                     "Google, sin API key ni facturación.") or None
+            apps_script_token = st.text_input(
+                "Token (opcional)", type="password", key="conv_gs_token") or None
+            if not apps_script_url:
+                st.info("Pega la URL de tu Web App para usar Google gratis. "
+                        "Mientras tanto se usa Nominatim.")
+                proveedor = "nominatim"
         pais = st.text_input("Sesgo por país (ISO-2)", value="pe", key="conv_pais",
                              help="Mejora la precisión. Ej.: pe, cl, mx. Vacío = global.") or None
         idioma = st.text_input("Idioma", value="es", key="conv_idioma")
 
-    prov_kw = dict(proveedor=proveedor, api_key=api_key, idioma=idioma)
+    prov_kw = dict(proveedor=proveedor, api_key=api_key, idioma=idioma,
+                   apps_script_url=apps_script_url, apps_script_token=apps_script_token)
 
     tab_archivo, tab_puntual = st.tabs(
         ["📑 Por archivo (CSV/Excel)", "🔎 Conversión puntual"])
