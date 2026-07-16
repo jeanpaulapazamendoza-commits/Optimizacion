@@ -262,97 +262,258 @@ ORS_MAX_JOBS = 50               # límite del plan gratuito de ORS (optimization
 # resultados") y vuelve a ver los grupos y el orden de visita en el mapa,
 # sin recalcular. Útil si la página se recargó y se perdió la vista.
 # ===========================================================
-def render_visor_resultado():
-    st.title("📤 Ver un resultado de ruteo guardado")
-    st.caption(
-        "¿Se te recargó la app y perdiste el mapa? Sube aquí el CSV que "
-        "descargaste del ruteo (botón «Descargar TODAS las rutas» o «Descargar "
-        "resultados») y recupera la vista de tus grupos y su orden de visita. "
-        "Las líneas conectan las tiendas en el orden de reparto (no incluye el "
-        "Centro de Distribución, que no viene en el archivo)."
-    )
+def _visor_leer_csv(arch):
+    """Lee un CSV subido detectando separador (, o ;) y codificación."""
+    for _enc in ("utf-8-sig", "latin-1"):
+        try:
+            arch.seek(0)
+            return pd.read_csv(arch, sep=None, engine="python",
+                               encoding=_enc, on_bad_lines="skip")
+        except Exception:
+            continue
+    return None
 
+
+def _visor_buscar(cols, *alias):
+    """Encuentra una columna por nombre tolerando mayúsculas/acentos/duplicados."""
+    norm = {str(c).strip().lower(): c for c in cols}
+    for a in alias:
+        if a in norm:
+            return norm[a]
+    return None
+
+
+def _visor_num(serie):
+    return pd.to_numeric(serie.astype(str).str.replace(",", ".", regex=False),
+                         errors="coerce")
+
+
+def _visor_ckey(c):
+    """Orden numérico de grupos: 0,1,2,...,10,11 (no 0,1,10,2...)."""
+    try: return (0, int(float(c)))
+    except Exception: return (1, str(c))
+
+
+def _visor_norm_cluster(v):
+    """Normaliza el id de grupo para que coincida siempre: '0.0'->'0', '12.0'->'12',
+    ' 3 '->'3'; deja intactos los no numéricos ('nan', 'ZonaA')."""
+    s = str(v).strip()
+    try:
+        f = float(s)
+        return str(int(f)) if f == int(f) else s
+    except (ValueError, OverflowError):
+        return s
+
+
+def _visor_hav(lat, lon, lats, lons):
+    """Distancia haversine (m) de un punto a un array de puntos (vectorizada)."""
+    R = 6_371_008.8
+    p1 = math.radians(lat); p2 = np.radians(np.asarray(lats, dtype=float))
+    dphi = p2 - p1
+    dl = np.radians(np.asarray(lons, dtype=float)) - math.radians(lon)
+    a = np.sin(dphi / 2) ** 2 + math.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def render_visor_resultado():
+    st.title("📤 Ver / editar un resultado de ruteo guardado")
+    st.caption(
+        "Sube el CSV que descargaste del ruteo y recupera el mapa. Además puedes "
+        "fijar tu **Centro de Distribución**, **agregar puntos nuevos** desde otro "
+        "archivo y **re-optimizar** las rutas afectadas — todo sin recalcular desde cero. "
+        "Al final descarga el resultado actualizado para seguir sumando después.")
+
+    # =================================================================
+    # PASO ① — Subir el ruteo guardado
+    # =================================================================
+    st.subheader("① Sube tu ruteo guardado")
     archivo = st.file_uploader(
-        "Sube el CSV del resultado de ruteo", type=["csv"], key="visor_upload")
+        "CSV del resultado (botón «Descargar TODAS las rutas» o «Descargar resultados»)",
+        type=["csv"], key="visor_upload")
     if archivo is None:
         st.info("⬆️ Sube tu archivo para reconstruir la visualización.")
         return
 
-    # 1) Leer detectando separador (, o ;) y codificación (utf-8 o latin-1)
-    df_r = None
-    for _enc in ("utf-8-sig", "latin-1"):
-        try:
-            archivo.seek(0)
-            df_r = pd.read_csv(archivo, sep=None, engine="python",
-                               encoding=_enc, on_bad_lines="skip")
-            break
-        except Exception:
-            df_r = None
+    df_r = _visor_leer_csv(archivo)
     if df_r is None or df_r.empty:
         st.error("No pude leer el archivo. Asegúrate de que sea el CSV que exporta la app.")
         return
 
-    # 2) Localizar columnas de forma flexible (tolera nombres/acentos/duplicados)
-    def _buscar(cols, *alias):
-        norm = {str(c).strip().lower(): c for c in cols}
-        for a in alias:
-            if a in norm:
-                return norm[a]
-        return None
-
     cols = list(df_r.columns)
-    col_cluster = _buscar(cols, "cluster", "grupo")
-    col_orden   = _buscar(cols, "orden")
-    col_codigo  = _buscar(cols, "código", "codigo", "orden.1")
-    col_tienda  = _buscar(cols, "tienda", "name_sucursal", "nombre")
-    col_distr   = _buscar(cols, "distrito")
-    col_bultos  = _buscar(cols, "bultos", "cantidad_bultos")
-    col_prior   = _buscar(cols, "prioridad")
-    col_eta     = _buscar(cols, "llegada (eta)", "llegada", "eta")
-    col_lat     = _buscar(cols, "latitud", "lat")
-    col_lon     = _buscar(cols, "longitud", "lon", "lng", "long")
-
-    faltan = [n for n, c in [("Cluster", col_cluster), ("Latitud", col_lat),
-                             ("Longitud", col_lon)] if c is None]
+    c_cluster = _visor_buscar(cols, "cluster", "grupo")
+    c_orden   = _visor_buscar(cols, "orden")
+    c_codigo  = _visor_buscar(cols, "código", "codigo", "orden.1")
+    c_tienda  = _visor_buscar(cols, "tienda", "name_sucursal", "nombre")
+    c_distr   = _visor_buscar(cols, "distrito")
+    c_bultos  = _visor_buscar(cols, "bultos", "cantidad_bultos")
+    c_prior   = _visor_buscar(cols, "prioridad")
+    c_eta     = _visor_buscar(cols, "llegada (eta)", "llegada", "eta")
+    c_lat     = _visor_buscar(cols, "latitud", "lat")
+    c_lon     = _visor_buscar(cols, "longitud", "lon", "lng", "long")
+    faltan = [n for n, c in [("Cluster", c_cluster), ("Latitud", c_lat),
+                             ("Longitud", c_lon)] if c is None]
     if faltan:
         st.error(f"Al archivo le faltan columnas obligatorias: {', '.join(faltan)}. "
                  f"Columnas encontradas: {', '.join(map(str, cols))}")
         return
 
-    # 3) Normalizar a un dataframe de trabajo
     d = pd.DataFrame()
-    d["cluster"] = df_r[col_cluster].astype(str).str.strip()
-    d["lat"] = pd.to_numeric(
-        df_r[col_lat].astype(str).str.replace(",", ".", regex=False), errors="coerce")
-    d["lon"] = pd.to_numeric(
-        df_r[col_lon].astype(str).str.replace(",", ".", regex=False), errors="coerce")
-    d["orden"] = (pd.to_numeric(df_r[col_orden], errors="coerce")
-                  if col_orden else pd.Series(range(1, len(df_r) + 1)))
-    d["tienda"] = df_r[col_tienda].astype(str) if col_tienda else ""
-    d["codigo"] = df_r[col_codigo].astype(str) if col_codigo else ""
-    d["distrito"] = df_r[col_distr].astype(str) if col_distr else ""
-    d["bultos"] = (pd.to_numeric(df_r[col_bultos], errors="coerce").fillna(0).astype(int)
-                   if col_bultos else 0)
-    d["prioridad"] = (pd.to_numeric(df_r[col_prior], errors="coerce").fillna(0).astype(int)
-                      if col_prior else 0)
-    d["eta"] = df_r[col_eta].astype(str) if col_eta else ""
+    d["cluster"]   = df_r[c_cluster].map(_visor_norm_cluster)
+    d["lat"]       = _visor_num(df_r[c_lat])
+    d["lon"]       = _visor_num(df_r[c_lon])
+    d["orden"]     = _visor_num(df_r[c_orden]) if c_orden else pd.Series(range(1, len(df_r) + 1))
+    d["tienda"]    = df_r[c_tienda].astype(str) if c_tienda else "Tienda"
+    d["codigo"]    = df_r[c_codigo].astype(str) if c_codigo else ""
+    d["distrito"]  = df_r[c_distr].astype(str) if c_distr else ""
+    d["bultos"]    = _visor_num(df_r[c_bultos]).fillna(0).astype(int) if c_bultos else 0
+    d["prioridad"] = _visor_num(df_r[c_prior]).fillna(0).astype(int) if c_prior else 0
+    d["eta"]       = df_r[c_eta].astype(str) if c_eta else ""
+    d["nuevo"]     = False
     d = d.dropna(subset=["lat", "lon"]).reset_index(drop=True)
     if d.empty:
         st.error("No encontré coordenadas válidas (Latitud/Longitud) en el archivo.")
         return
     d["orden"] = d["orden"].fillna(0)
 
-    def _cluster_key(c):
-        try: return (0, int(float(c)))
-        except Exception: return (1, str(c))
-    clusters = sorted(d["cluster"].unique(), key=_cluster_key)
+    # =================================================================
+    # PASO ② — Centro de Distribución (lo colocas manualmente)
+    # =================================================================
+    st.subheader("② Centro de Distribución")
+    cca, ccb, ccc = st.columns([1, 1, 1.4])
+    cd_lat = cca.number_input("Latitud del CD", value=float(round(d["lat"].mean(), 6)),
+                              format="%.6f", key="visor_cd_lat")
+    cd_lon = ccb.number_input("Longitud del CD", value=float(round(d["lon"].mean(), 6)),
+                              format="%.6f", key="visor_cd_lon")
+    usar_cd = ccc.checkbox("Mostrar el CD y conectar las rutas desde él",
+                           value=True, key="visor_usar_cd")
+    ccc.caption("Empieza en el centro de tus puntos; edítalo con las coordenadas de tu CD real.")
 
-    # 4) Controles de la vista
+    # =================================================================
+    # PASO ③ — Agregar puntos nuevos (opcional)
+    # =================================================================
+    st.subheader("③ Agregar puntos nuevos (opcional)")
+    st.caption("Sube otro CSV con tiendas nuevas (mínimo **Latitud** y **Longitud**; opcional "
+               "Tienda, Código, Distrito, Bultos, Prioridad y **Grupo**). Si no indicas Grupo, "
+               "cada punto se asigna automáticamente al grupo más cercano.")
+    archivo_nuevos = st.file_uploader("CSV de puntos nuevos", type=["csv"], key="visor_nuevos")
+
+    if archivo_nuevos is not None:
+        df_n = _visor_leer_csv(archivo_nuevos)
+        if df_n is None or df_n.empty:
+            st.warning("No pude leer el archivo de puntos nuevos.")
+        else:
+            nc = list(df_n.columns)
+            nlat = _visor_buscar(nc, "latitud", "lat")
+            nlon = _visor_buscar(nc, "longitud", "lon", "lng", "long")
+            if not nlat or not nlon:
+                st.error("El archivo de puntos nuevos necesita columnas Latitud y Longitud.")
+            else:
+                ngru = _visor_buscar(nc, "grupo", "cluster")
+                nv = pd.DataFrame()
+                nv["lat"]       = _visor_num(df_n[nlat])
+                nv["lon"]       = _visor_num(df_n[nlon])
+                _nt = _visor_buscar(nc, "tienda", "name_sucursal", "nombre")
+                _ncod = _visor_buscar(nc, "código", "codigo", "codigo_sucursal")
+                _ndis = _visor_buscar(nc, "distrito")
+                _nbul = _visor_buscar(nc, "bultos", "cantidad_bultos")
+                _npri = _visor_buscar(nc, "prioridad")
+                nv["tienda"]    = df_n[_nt].astype(str) if _nt else "Nuevo punto"
+                nv["codigo"]    = df_n[_ncod].astype(str) if _ncod else ""
+                nv["distrito"]  = df_n[_ndis].astype(str) if _ndis else ""
+                nv["bultos"]    = _visor_num(df_n[_nbul]).fillna(1).astype(int) if _nbul else 1
+                nv["prioridad"] = _visor_num(df_n[_npri]).fillna(0).astype(int) if _npri else 0
+                nv["cluster"]   = (df_n[ngru].map(_visor_norm_cluster) if ngru else "")
+                nv["eta"]       = ""
+                nv["orden"]     = 0
+                nv["nuevo"]     = True
+                nv = nv.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+                if nv.empty:
+                    st.warning("El archivo de puntos nuevos no tiene coordenadas válidas.")
+                else:
+                    # Asignar grupo por cercanía a los que no traen Grupo
+                    sin_grupo = nv["cluster"].isin(["", "None", "nan", "NaN"])
+                    if sin_grupo.any():
+                        blat = d["lat"].values; blon = d["lon"].values; bclu = d["cluster"].values
+                        for i in nv.index[sin_grupo]:
+                            dist = _visor_hav(nv.at[i, "lat"], nv.at[i, "lon"], blat, blon)
+                            nv.at[i, "cluster"] = str(bclu[int(np.argmin(dist))])
+                    # Anexar y colocar los nuevos al final del orden de su grupo
+                    d = pd.concat([d, nv[d.columns]], ignore_index=True)
+                    for c in nv["cluster"].unique():
+                        mx = d[(d["cluster"] == c) & (~d["nuevo"])]["orden"].max()
+                        mx = 0 if pd.isna(mx) else int(mx)
+                        for j, idx in enumerate(d.index[(d["cluster"] == c) & (d["nuevo"])], 1):
+                            d.at[idx, "orden"] = mx + j
+                    st.success(f"➕ {len(nv)} punto(s) nuevo(s) agregado(s) a "
+                               f"{nv['cluster'].nunique()} grupo(s).")
+
+    clusters = sorted(d["cluster"].unique(), key=_visor_ckey)
+
+    # =================================================================
+    # PASO ④ — Re-optimizar el orden (opcional, usa OR-Tools)
+    # =================================================================
+    st.subheader("④ Re-optimizar")
+    reopt_on = st.checkbox("🔁 Re-optimizar el orden de visita con OR-Tools",
+                           key="visor_reopt")
+    if reopt_on:
+        grupos_nuevos = sorted(d[d["nuevo"]]["cluster"].unique(), key=_visor_ckey)
+        r1, r2, r3 = st.columns(3)
+        alcance = r1.radio("Qué re-optimizar",
+                           ["Solo grupos con puntos nuevos", "Todas las rutas"],
+                           key="visor_reopt_alcance")
+        motor_lbl = r2.selectbox("Motor",
+                                 ["Haversine (rápido, sin internet)",
+                                  "OSRM (calles reales, necesita internet)"],
+                                 key="visor_reopt_motor")
+        tiempo = r3.slider("Segundos de cálculo por ruta", 1, 5, 2, key="visor_reopt_tiempo")
+        s1, s2, s3 = st.columns(3)
+        hora_salida = s1.time_input("Hora de salida del CD", value=_dt.time(8, 0),
+                                    key="visor_reopt_salida")
+        servicio_min = s2.number_input("Min. por parada (servicio)", 0, 60, 3,
+                                       key="visor_reopt_serv")
+        cerrar = s3.checkbox("Cerrar la ruta (volver al CD al final)", value=True,
+                             key="visor_reopt_cerrar")
+        salida_s = hora_salida.hour * 3600 + hora_salida.minute * 60
+        motor = "osrm" if motor_lbl.startswith("OSRM") else "haversine"
+        objetivo = grupos_nuevos if alcance.startswith("Solo") else clusters
+        if not objetivo:
+            st.info("No hay grupos con puntos nuevos. Agrega puntos en el paso ③ "
+                    "o elige «Todas las rutas».")
+        else:
+            if alcance.startswith("Todas") and len(objetivo) > 6:
+                st.caption(f"⏳ Re-optimizando {len(objetivo)} rutas × {tiempo}s — puede tardar "
+                           f"~{len(objetivo) * tiempo}s la primera vez.")
+            payload = tuple(
+                (c, tuple((int(i), float(la), float(lo), int(pr))
+                          for i, la, lo, pr in zip(
+                              d.index[d["cluster"] == c], d.loc[d["cluster"] == c, "lat"],
+                              d.loc[d["cluster"] == c, "lon"], d.loc[d["cluster"] == c, "prioridad"])))
+                for c in objetivo)
+            reopt = _visor_reoptimizar(payload, float(cd_lat), float(cd_lon), motor,
+                                       bool(cerrar), int(tiempo), int(salida_s),
+                                       int(servicio_min) * 60)
+            if reopt:
+                for c, info in reopt.items():
+                    for idx, pos in info["orden"].items():
+                        d.at[idx, "orden"] = pos
+                        d.at[idx, "eta"] = info["eta"].get(idx, "")
+                km = sum(info["dist_km"] for info in reopt.values())
+                st.success(f"✅ Re-optimizada(s) {len(reopt)} ruta(s) desde el CD. "
+                           f"Distancia total de esas rutas: {km:.1f} km.")
+            else:
+                st.warning("No se pudo re-optimizar (revisa el CD o el motor elegido).")
+
+    # =================================================================
+    # PASO ⑤ — Ver el mapa
+    # =================================================================
+    st.subheader("⑤ Mapa")
     c1, c2, c3 = st.columns([2, 1, 1])
-    sel = c1.multiselect("Grupos a mostrar", clusters, default=clusters)
+    sel = c1.multiselect("Grupos a mostrar", clusters, default=clusters, key="visor_sel")
     estilo = c2.selectbox("Mapa base",
-                          ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"])
-    nombre_paleta = c3.selectbox("Paleta", ["Bold", "Vivid", "D3", "Light24", "Plotly"])
+                          ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"],
+                          key="visor_estilo")
+    nombre_paleta = c3.selectbox("Paleta", ["Bold", "Vivid", "D3", "Light24", "Plotly"],
+                                 key="visor_paleta")
     if not sel:
         st.warning("Selecciona al menos un grupo para ver el mapa.")
         return
@@ -362,13 +523,12 @@ def render_visor_resultado():
     color_de = {c: paleta[i % len(paleta)] for i, c in enumerate(clusters)}
     dv = d[d["cluster"].isin(sel)]
 
-    # 5) Resumen
-    k1, k2, k3 = st.columns(3)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("🏪 Tiendas", len(dv))
     k2.metric("🗂️ Grupos", dv["cluster"].nunique())
     k3.metric("📦 Bultos", int(dv["bultos"].sum()))
+    k4.metric("🆕 Nuevos", int(dv["nuevo"].sum()))
 
-    # 6) Mapa: un FeatureGroup por grupo (activable), línea de ruta + badges numerados
     m = folium.Map(location=[dv["lat"].mean(), dv["lon"].mean()],
                    zoom_start=13, tiles=estilo, control_scale=True)
     Fullscreen(position="topleft", title="Pantalla completa",
@@ -380,19 +540,20 @@ def render_visor_resultado():
         color = color_de[c]
         fg = folium.FeatureGroup(name=f"Grupo {c} · {len(sub)} tiendas", show=True)
         pts = sub[["lat", "lon"]].values.tolist()
-        if len(pts) >= 2:
-            folium.PolyLine(pts, color=color, weight=4, opacity=0.85).add_to(fg)
+        linea = ([[cd_lat, cd_lon]] + pts + [[cd_lat, cd_lon]]) if usar_cd else pts
+        if len(linea) >= 2:
+            folium.PolyLine(linea, color=color, weight=4, opacity=0.85).add_to(fg)
         for _, r in sub.iterrows():
             num = int(r["orden"]) if r["orden"] else 0
-            prio = int(r["prioridad"]) > 0
-            borde = "#FFD700" if prio else "white"
+            es_nuevo = bool(r["nuevo"]); prio = int(r["prioridad"]) > 0
+            borde = "#00E5FF" if es_nuevo else ("#FFD700" if prio else "white")
             popup = folium.Popup(
                 f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
-                f"<b>{r['tienda']}</b><br>Código: {r['codigo']}<br>"
+                f"{'🆕 ' if es_nuevo else ''}<b>{r['tienda']}</b><br>Código: {r['codigo']}<br>"
                 f"Distrito: {r['distrito']}<br>Bultos: {int(r['bultos'])}<br>"
-                f"🕐 Llegada: <b>{r['eta']}</b><br>Grupo: {c} · Orden: <b>#{num}</b><br>"
+                f"🕐 Llegada: <b>{r['eta'] or '—'}</b><br>Grupo: {c} · Orden: <b>#{num}</b><br>"
                 f"Lat: {r['lat']:.5f} · Lon: {r['lon']:.5f}</div>", max_width=260)
-            tip = ("⭐ " if prio else "") + f"{r['tienda']} · #{num}"
+            tip = ("🆕 " if es_nuevo else "") + ("⭐ " if prio else "") + f"{r['tienda']} · #{num}"
             if num:
                 folium.Marker(
                     [r["lat"], r["lon"]],
@@ -410,20 +571,32 @@ def render_visor_resultado():
                     fill=True, fill_color=color, fill_opacity=0.95,
                     tooltip=tip, popup=popup).add_to(fg)
         fg.add_to(m)
+    if usar_cd:
+        folium.Marker(
+            [cd_lat, cd_lon],
+            icon=folium.Icon(color="black", icon="industry", prefix="fa"),
+            tooltip="🏭 Centro de Distribución",
+            popup=folium.Popup(f"<b>🏭 Centro de Distribución</b><br>"
+                               f"Lat: {cd_lat:.5f}<br>Lon: {cd_lon:.5f}", max_width=220)
+        ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     try:
-        m.fit_bounds([[dv["lat"].min(), dv["lon"].min()],
-                      [dv["lat"].max(), dv["lon"].max()]])
+        lats_b = list(dv["lat"]) + ([cd_lat] if usar_cd else [])
+        lons_b = list(dv["lon"]) + ([cd_lon] if usar_cd else [])
+        m.fit_bounds([[min(lats_b), min(lons_b)], [max(lats_b), max(lons_b)]])
     except Exception:
         pass
     st_folium(m, height=620, use_container_width=True,
               returned_objects=[], key="visor_map")
 
-    # 7) Resumen por grupo + detalle
+    # =================================================================
+    # PASO ⑥ — Resumen, detalle y descarga del resultado actualizado
+    # =================================================================
     dv_ord = dv.sort_values(["cluster", "orden"])
     resumen = (dv_ord.groupby("cluster")
-               .agg(Tiendas=("tienda", "size"), Bultos=("bultos", "sum"),
-                    ETA_inicio=("eta", "first"), ETA_fin=("eta", "last"))
+               .agg(Tiendas=("tienda", "size"), Nuevos=("nuevo", "sum"),
+                    Bultos=("bultos", "sum"), ETA_inicio=("eta", "first"),
+                    ETA_fin=("eta", "last"))
                .reindex([c for c in clusters if c in sel]).reset_index()
                .rename(columns={"cluster": "Grupo", "ETA_inicio": "ETA inicio",
                                 "ETA_fin": "ETA fin"}))
@@ -434,9 +607,22 @@ def render_visor_resultado():
             dv_ord.rename(columns={
                 "cluster": "Grupo", "orden": "Orden", "tienda": "Tienda",
                 "codigo": "Código", "distrito": "Distrito", "bultos": "Bultos",
-                "prioridad": "Prioridad", "eta": "Llegada (ETA)",
+                "prioridad": "Prioridad", "eta": "Llegada (ETA)", "nuevo": "Nuevo",
                 "lat": "Latitud", "lon": "Longitud"}),
             use_container_width=True, hide_index=True)
+
+    d2 = d.sort_values(["cluster", "orden"])
+    export = pd.DataFrame({
+        "Cluster": d2["cluster"], "Orden": d2["orden"].astype(int),
+        "Código": d2["codigo"], "Tienda": d2["tienda"], "Distrito": d2["distrito"],
+        "Bultos": d2["bultos"].astype(int), "Prioridad": d2["prioridad"].astype(int),
+        "Llegada (ETA)": d2["eta"], "Latitud": d2["lat"].round(6),
+        "Longitud": d2["lon"].round(6)})
+    st.download_button(
+        "⬇️ Descargar resultado actualizado (CSV)",
+        data=export.to_csv(index=False).encode("utf-8"),
+        file_name="ruteo_actualizado.csv", mime="text/csv",
+        help="Guárdalo y vuelve a subirlo aquí para seguir agregando puntos más adelante.")
 
 
 # ===========================================================
@@ -462,9 +648,8 @@ if len(_opciones_nav) > 1:
     if _nav == _NAV_CONV:
         render_conversor()
         st.stop()
-    elif _nav == _NAV_VISOR:
-        render_visor_resultado()
-        st.stop()
+    # El Visor (_NAV_VISOR) se ejecuta más abajo, después de definir las
+    # funciones de ruteo que usa para re-optimizar (rutear_cluster_ortools).
 
 # ===========================================================
 # FUNCIONES — GEOGRAFÍA
@@ -1372,6 +1557,43 @@ def generar_plantilla_excel():
 def generar_plantilla_csv():
     return _plantilla_df().to_csv(index=False).encode("utf-8")
 
+
+# ===========================================================
+# VISOR DE RESULTADOS — ejecución
+# Se corre aquí (no arriba) porque re-optimiza con rutear_cluster_ortools,
+# ya definida. El resultado del re-optimizado se cachea por sus argumentos,
+# así cambiar la paleta/vista no lo recalcula.
+# ===========================================================
+@st.cache_data(show_spinner="Re-optimizando rutas con OR-Tools…")
+def _visor_reoptimizar(payload, cd_lat, cd_lon, motor, cerrar, tiempo, salida_s, servicio_uni):
+    """payload: tupla ( (grupo, ((idx, lat, lon, prioridad), ...)), ... ).
+    servicio_uni: segundos de servicio por parada (para ETAs realistas).
+    Devuelve {grupo: {orden:{idx:pos}, eta:{idx:'HH:MM'}, dist_km, dur_min}}."""
+    out = {}
+    for cluster, filas in payload:
+        cdata = pd.DataFrame(
+            {"latitud":  [la for (_i, la, _lo, _pr) in filas],
+             "longitud": [lo for (_i, _la, lo, _pr) in filas],
+             "prioridad":[pr for (_i, _la, _lo, pr) in filas]},
+            index=[i for (i, _la, _lo, _pr) in filas])
+        serv = [servicio_uni] * len(filas) if servicio_uni else None
+        try:
+            res = rutear_cluster_ortools(cdata, cd_lat, cd_lon, motor, cerrar,
+                                         tiempo, servicio_s=serv, salida_cd_s=salida_s)
+        except Exception:
+            res = None
+        if not res:
+            continue
+        out[cluster] = {
+            "orden": {int(idx): pos + 1 for pos, idx in enumerate(res["orden"])},
+            "eta":   {int(idx): segundos_a_hora(res["etas"].get(idx)) for idx in res["orden"]},
+            "dist_km": res["distance_km"], "dur_min": res["duration_min"]}
+    return out
+
+
+if _nav == _NAV_VISOR:
+    render_visor_resultado()
+    st.stop()
 
 # ===========================================================
 # SIDEBAR — UPLOAD
