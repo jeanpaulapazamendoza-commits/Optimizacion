@@ -306,13 +306,62 @@ def _visor_norm_cluster(v):
 
 
 def _visor_hav(lat, lon, lats, lons):
-    """Distancia haversine (m) de un punto a un array de puntos (vectorizada)."""
+    """Distancia haversine (m). Vectorizada: acepta escalares o arrays alineados
+    (punto→muchos, o pares elemento a elemento)."""
     R = 6_371_008.8
-    p1 = math.radians(lat); p2 = np.radians(np.asarray(lats, dtype=float))
+    p1 = np.radians(np.asarray(lat, dtype=float))
+    p2 = np.radians(np.asarray(lats, dtype=float))
     dphi = p2 - p1
-    dl = np.radians(np.asarray(lons, dtype=float)) - math.radians(lon)
-    a = np.sin(dphi / 2) ** 2 + math.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    dl = np.radians(np.asarray(lons, dtype=float)) - np.radians(np.asarray(lon, dtype=float))
+    a = np.sin(dphi / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
     return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def _visor_plantilla_nuevos_df():
+    """Estructura que debe tener el archivo de puntos nuevos."""
+    return pd.DataFrame({
+        "Tienda":    ["Tienda nueva 1", "Tienda nueva 2", "Tienda nueva 3"],
+        "Latitud":   [-11.9360, -11.9372, -11.9505],
+        "Longitud":  [-77.0745, -77.0790, -77.0801],
+        "Distrito":  ["Los Olivos", "Los Olivos", "Los Olivos"],
+        "Bultos":    [2, 3, 1],
+        "Prioridad": [0, 1, 0],
+        "Grupo":     ["", "", "2"],   # opcional (texto): vacío = asignación automática
+    })
+
+
+@st.cache_data
+def _visor_plantilla_nuevos_csv():
+    return _visor_plantilla_nuevos_df().to_csv(index=False).encode("utf-8")
+
+
+@st.cache_data
+def _visor_plantilla_nuevos_xlsx():
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        _visor_plantilla_nuevos_df().to_excel(w, index=False, sheet_name="puntos_nuevos")
+    return buf.getvalue()
+
+
+def _visor_mejor_insercion(plat, plon, d, clusters, cd_lat, cd_lon):
+    """«Mejor ruta»: devuelve (grupo, orden_previo) donde insertar el punto añade
+    el MENOR desvío a la ruta (inserción más barata, considerando el CD como
+    inicio/fin de cada recorrido)."""
+    mejor_g = clusters[0] if clusters else None
+    mejor_prev, mejor_costo = 0.0, float("inf")
+    for c in clusters:
+        sub = d[d["cluster"] == c].sort_values("orden")
+        lat = np.array([cd_lat] + list(sub["lat"]) + [cd_lat], dtype=float)
+        lon = np.array([cd_lon] + list(sub["lon"]) + [cd_lon], dtype=float)
+        ordn = [0.0] + list(sub["orden"].astype(float)) + \
+               [(float(sub["orden"].max()) + 1) if len(sub) else 1.0]
+        dp = _visor_hav(plat, plon, lat, lon)                    # punto → cada nodo
+        seg = _visor_hav(lat[:-1], lon[:-1], lat[1:], lon[1:])   # nodo → nodo siguiente
+        costos = dp[:-1] + dp[1:] - seg
+        j = int(np.argmin(costos))
+        if costos[j] < mejor_costo:
+            mejor_costo, mejor_g, mejor_prev = costos[j], c, ordn[j]
+    return mejor_g, mejor_prev
 
 
 def render_visor_resultado():
@@ -392,10 +441,23 @@ def render_visor_resultado():
     # PASO ③ — Agregar puntos nuevos (opcional)
     # =================================================================
     st.subheader("③ Agregar puntos nuevos (opcional)")
-    st.caption("Sube otro CSV con tiendas nuevas (mínimo **Latitud** y **Longitud**; opcional "
-               "Tienda, Código, Distrito, Bultos, Prioridad y **Grupo**). Si no indicas Grupo, "
-               "cada punto se asigna automáticamente al grupo más cercano.")
-    archivo_nuevos = st.file_uploader("CSV de puntos nuevos", type=["csv"], key="visor_nuevos")
+    with st.expander("📥 ¿Qué estructura debe tener tu archivo? Descarga la plantilla"):
+        st.caption("Tu archivo (CSV o Excel) debe tener estas columnas. Solo **Latitud** y "
+                   "**Longitud** son obligatorias; el resto es opcional. Deja **Grupo** vacío "
+                   "para asignarlo con la app, o pon el número de grupo para forzarlo.")
+        st.dataframe(_visor_plantilla_nuevos_df(), use_container_width=True, hide_index=True)
+        pc1, pc2 = st.columns(2)
+        pc1.download_button("📄 Plantilla CSV", data=_visor_plantilla_nuevos_csv(),
+                            file_name="plantilla_puntos_nuevos.csv", mime="text/csv",
+                            use_container_width=True)
+        pc2.download_button(
+            "📊 Plantilla Excel", data=_visor_plantilla_nuevos_xlsx(),
+            file_name="plantilla_puntos_nuevos.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+
+    archivo_nuevos = st.file_uploader("Sube tu CSV de puntos nuevos", type=["csv"],
+                                      key="visor_nuevos")
 
     if archivo_nuevos is not None:
         df_n = _visor_leer_csv(archivo_nuevos)
@@ -422,30 +484,68 @@ def render_visor_resultado():
                 nv["distrito"]  = df_n[_ndis].astype(str) if _ndis else ""
                 nv["bultos"]    = _visor_num(df_n[_nbul]).fillna(1).astype(int) if _nbul else 1
                 nv["prioridad"] = _visor_num(df_n[_npri]).fillna(0).astype(int) if _npri else 0
-                nv["cluster"]   = (df_n[ngru].map(_visor_norm_cluster) if ngru else "")
+                nv["grupo_arch"] = (df_n[ngru].map(_visor_norm_cluster) if ngru else "")
                 nv["eta"]       = ""
-                nv["orden"]     = 0
+                nv["orden"]     = 0.0
                 nv["nuevo"]     = True
                 nv = nv.dropna(subset=["lat", "lon"]).reset_index(drop=True)
                 if nv.empty:
                     st.warning("El archivo de puntos nuevos no tiene coordenadas válidas.")
                 else:
-                    # Asignar grupo por cercanía a los que no traen Grupo
-                    sin_grupo = nv["cluster"].isin(["", "None", "nan", "NaN"])
-                    if sin_grupo.any():
-                        blat = d["lat"].values; blon = d["lon"].values; bclu = d["cluster"].values
-                        for i in nv.index[sin_grupo]:
-                            dist = _visor_hav(nv.at[i, "lat"], nv.at[i, "lon"], blat, blon)
-                            nv.at[i, "cluster"] = str(bclu[int(np.argmin(dist))])
-                    # Anexar y colocar los nuevos al final del orden de su grupo
+                    grupos_base = sorted(d["cluster"].unique(), key=_visor_ckey)
+                    # Sugerencia «mejor ruta» (grupo + posición) para cada punto
+                    suger = [_visor_mejor_insercion(nv.at[i, "lat"], nv.at[i, "lon"],
+                                                    d, grupos_base, cd_lat, cd_lon)
+                             for i in nv.index]
+
+                    modo = st.radio(
+                        "¿Cómo asignar los puntos nuevos a una ruta?",
+                        ["🤖 Automático — a la mejor ruta (menor desvío)",
+                         "✍️ Manual — yo elijo el grupo de cada punto"],
+                        horizontal=True, key="visor_modo_asig")
+                    auto = modo.startswith("🤖")
+
+                    orden_prev = {}
+                    if auto:
+                        nv["cluster"] = [suger[i][0] for i in nv.index]
+                        orden_prev = {i: suger[i][1] for i in nv.index}
+                    else:
+                        base = [nv.at[i, "grupo_arch"] if nv.at[i, "grupo_arch"] in grupos_base
+                                else suger[i][0] for i in nv.index]
+                        edit_df = pd.DataFrame({"Tienda": nv["tienda"].values,
+                                                "Bultos": nv["bultos"].values, "Grupo": base})
+                        edited = st.data_editor(
+                            edit_df, hide_index=True, use_container_width=True,
+                            key="visor_edit_grupos",
+                            column_config={
+                                "Tienda": st.column_config.TextColumn(disabled=True),
+                                "Bultos": st.column_config.NumberColumn(disabled=True),
+                                "Grupo": st.column_config.SelectboxColumn(
+                                    "Grupo", options=grupos_base, required=True,
+                                    help="Elige a qué ruta va cada punto nuevo")})
+                        nv["cluster"] = [str(g) for g in edited["Grupo"].values]
+                        st.caption("En modo manual el punto se anexa al final de su grupo; "
+                                   "usa el paso ④ para re-optimizar su posición.")
+
+                    # Anexar y colocar el orden de cada nuevo punto
                     d = pd.concat([d, nv[d.columns]], ignore_index=True)
+                    nuevos_idx = list(d.index[d["nuevo"]])
+                    for pos_local, i in enumerate(nv.index):
+                        g_idx = nuevos_idx[pos_local]
+                        if auto:
+                            d.at[g_idx, "orden"] = orden_prev[i] + 0.5
+                        else:
+                            mx = d[(d["cluster"] == d.at[g_idx, "cluster"])
+                                   & (~d["nuevo"])]["orden"].max()
+                            d.at[g_idx, "orden"] = (0.0 if pd.isna(mx) else float(mx)) + 1.0
+                    # Renumerar 1..N los grupos que recibieron puntos (respeta la posición)
                     for c in nv["cluster"].unique():
-                        mx = d[(d["cluster"] == c) & (~d["nuevo"])]["orden"].max()
-                        mx = 0 if pd.isna(mx) else int(mx)
-                        for j, idx in enumerate(d.index[(d["cluster"] == c) & (d["nuevo"])], 1):
-                            d.at[idx, "orden"] = mx + j
-                    st.success(f"➕ {len(nv)} punto(s) nuevo(s) agregado(s) a "
-                               f"{nv['cluster'].nunique()} grupo(s).")
+                        mask = d["cluster"] == c
+                        d.loc[mask, "orden"] = d.loc[mask, "orden"].rank(method="first").astype(int)
+                    st.success(
+                        f"➕ {len(nv)} punto(s) nuevo(s) agregado(s) a "
+                        f"{nv['cluster'].nunique()} grupo(s) — "
+                        f"{'automático · mejor ruta' if auto else 'manual'}.")
 
     clusters = sorted(d["cluster"].unique(), key=_visor_ckey)
 
