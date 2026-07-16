@@ -364,6 +364,18 @@ def _visor_mejor_insercion(plat, plon, d, clusters, cd_lat, cd_lon):
     return mejor_g, mejor_prev
 
 
+# Sentinela para puntos nuevos aún NO asignados a ninguna ruta.
+_VISOR_SIN = "· sin asignar ·"
+
+
+def _visor_clave(codigo, lat, lon):
+    """Clave estable de un punto nuevo: su código (único) o, si no tiene, lat|lon.
+    Sirve para recordar su asignación entre recargas y clics."""
+    c = str(codigo).strip()
+    return c if c and c.lower() not in ("nan", "none", "") \
+        else f"{float(lat):.6f}|{float(lon):.6f}"
+
+
 def render_visor_resultado():
     st.title("📤 Ver / editar un resultado de ruteo guardado")
     st.caption(
@@ -437,6 +449,8 @@ def render_visor_resultado():
                            value=True, key="visor_usar_cd")
     ccc.caption("Empieza en el centro de tus puntos; edítalo con las coordenadas de tu CD real.")
 
+    grupo_activo = None   # se define en el paso ③ si hay puntos nuevos (para el clic en mapa)
+
     # =================================================================
     # PASO ③ — Agregar puntos nuevos (opcional)
     # =================================================================
@@ -493,61 +507,88 @@ def render_visor_resultado():
                     st.warning("El archivo de puntos nuevos no tiene coordenadas válidas.")
                 else:
                     grupos_base = sorted(d["cluster"].unique(), key=_visor_ckey)
-                    # Sugerencia «mejor ruta» (grupo + posición) para cada punto
-                    suger = [_visor_mejor_insercion(nv.at[i, "lat"], nv.at[i, "lon"],
-                                                    d, grupos_base, cd_lat, cd_lon)
-                             for i in nv.index]
+                    # Nombres vacíos -> "(sin nombre)" (así no sale "None")
+                    _mal = nv["tienda"].astype(str).str.strip().str.lower()
+                    nv.loc[_mal.isin(["", "nan", "none"]), "tienda"] = "(sin nombre)"
+                    nv["clave"] = [_visor_clave(nv.at[i, "codigo"], nv.at[i, "lat"],
+                                                nv.at[i, "lon"]) for i in nv.index]
 
-                    modo = st.radio(
-                        "¿Cómo asignar los puntos nuevos a una ruta?",
-                        ["🤖 Automático — a la mejor ruta (menor desvío)",
-                         "✍️ Manual — yo elijo el grupo de cada punto"],
-                        horizontal=True, key="visor_modo_asig")
-                    auto = modo.startswith("🤖")
+                    # Estado de asignaciones (persiste entre recargas y clics del mapa).
+                    # Se reinicia si cambia el archivo de puntos nuevos.
+                    _sig = (archivo_nuevos.name, getattr(archivo_nuevos, "size", 0), len(nv))
+                    if st.session_state.get("visor_nuevos_sig") != _sig:
+                        st.session_state["visor_nuevos_sig"] = _sig
+                        st.session_state["visor_asig"] = {}
+                        st.session_state.pop("visor_edit_grupos", None)
+                    asig = st.session_state.setdefault("visor_asig", {})
+                    for i in nv.index:            # inicializa: grupo del archivo, o «sin asignar»
+                        k = nv.at[i, "clave"]
+                        if k not in asig:
+                            gf = nv.at[i, "grupo_arch"]
+                            asig[k] = gf if gf in grupos_base else _VISOR_SIN
 
-                    orden_prev = {}
-                    if auto:
-                        nv["cluster"] = [suger[i][0] for i in nv.index]
-                        orden_prev = {i: suger[i][1] for i in nv.index}
-                    else:
-                        base = [nv.at[i, "grupo_arch"] if nv.at[i, "grupo_arch"] in grupos_base
-                                else suger[i][0] for i in nv.index]
-                        edit_df = pd.DataFrame({"Tienda": nv["tienda"].values,
-                                                "Bultos": nv["bultos"].values, "Grupo": base})
-                        edited = st.data_editor(
-                            edit_df, hide_index=True, use_container_width=True,
-                            key="visor_edit_grupos",
-                            column_config={
-                                "Tienda": st.column_config.TextColumn(disabled=True),
-                                "Bultos": st.column_config.NumberColumn(disabled=True),
-                                "Grupo": st.column_config.SelectboxColumn(
-                                    "Grupo", options=grupos_base, required=True,
-                                    help="Elige a qué ruta va cada punto nuevo")})
-                        nv["cluster"] = [str(g) for g in edited["Grupo"].values]
-                        st.caption("En modo manual el punto se anexa al final de su grupo; "
-                                   "usa el paso ④ para re-optimizar su posición.")
+                    # --- Controles de asignación ---
+                    ca1, ca2, ca3 = st.columns([1.5, 1, 1])
+                    grupo_activo = ca1.selectbox(
+                        "Grupo activo (para el clic en el mapa)", grupos_base,
+                        key="visor_grupo_activo",
+                        help="Haz clic en un punto GRIS del mapa para asignarlo a este grupo.")
+                    if ca2.button("🤖 Asignar pendientes (mejor ruta)", use_container_width=True):
+                        for i in nv.index:
+                            k = nv.at[i, "clave"]
+                            if asig.get(k) == _VISOR_SIN:
+                                g, _p = _visor_mejor_insercion(nv.at[i, "lat"], nv.at[i, "lon"],
+                                                               d, grupos_base, cd_lat, cd_lon)
+                                asig[k] = g
+                        st.session_state.pop("visor_edit_grupos", None)
+                    if ca3.button("↺ Todos sin asignar", use_container_width=True):
+                        for i in nv.index:
+                            asig[nv.at[i, "clave"]] = _VISOR_SIN
+                        st.session_state.pop("visor_edit_grupos", None)
 
-                    # Anexar y colocar el orden de cada nuevo punto
+                    st.caption("Asigna en la tabla, con el botón automático, o con **clic en un "
+                               "punto gris del mapa** (va al grupo activo). Los grises son los "
+                               "que faltan asignar.")
+                    edit_df = pd.DataFrame({
+                        "Código": nv["codigo"].astype(str).values,
+                        "Tienda": nv["tienda"].values, "Bultos": nv["bultos"].values,
+                        "Grupo": [asig[nv.at[i, "clave"]] for i in nv.index]})
+                    edited = st.data_editor(
+                        edit_df, hide_index=True, use_container_width=True,
+                        key="visor_edit_grupos",
+                        column_config={
+                            "Código": st.column_config.TextColumn(disabled=True),
+                            "Tienda": st.column_config.TextColumn(disabled=True),
+                            "Bultos": st.column_config.NumberColumn(disabled=True),
+                            "Grupo": st.column_config.SelectboxColumn(
+                                "Grupo", options=[_VISOR_SIN] + grupos_base, required=True,
+                                help="Elige la ruta o «sin asignar»")})
+                    for pos_local, i in enumerate(nv.index):
+                        asig[nv.at[i, "clave"]] = str(edited["Grupo"].values[pos_local])
+
+                    nv["cluster"] = [asig[nv.at[i, "clave"]] for i in nv.index]
+                    n_pend = int((nv["cluster"] == _VISOR_SIN).sum())
+
+                    # Anexar; asignados al final de su grupo, pendientes en orden 0
                     d = pd.concat([d, nv[d.columns]], ignore_index=True)
                     nuevos_idx = list(d.index[d["nuevo"]])
                     for pos_local, i in enumerate(nv.index):
                         g_idx = nuevos_idx[pos_local]
-                        if auto:
-                            d.at[g_idx, "orden"] = orden_prev[i] + 0.5
+                        c_a = d.at[g_idx, "cluster"]
+                        if c_a == _VISOR_SIN:
+                            d.at[g_idx, "orden"] = 0.0
                         else:
-                            mx = d[(d["cluster"] == d.at[g_idx, "cluster"])
-                                   & (~d["nuevo"])]["orden"].max()
+                            mx = d[(d["cluster"] == c_a) & (~d["nuevo"])]["orden"].max()
                             d.at[g_idx, "orden"] = (0.0 if pd.isna(mx) else float(mx)) + 1.0
-                    # Renumerar 1..N los grupos que recibieron puntos (respeta la posición)
-                    for c in nv["cluster"].unique():
+                    for c in nv.loc[nv["cluster"] != _VISOR_SIN, "cluster"].unique():
                         mask = d["cluster"] == c
                         d.loc[mask, "orden"] = d.loc[mask, "orden"].rank(method="first").astype(int)
-                    st.success(
-                        f"➕ {len(nv)} punto(s) nuevo(s) agregado(s) a "
-                        f"{nv['cluster'].nunique()} grupo(s) — "
-                        f"{'automático · mejor ruta' if auto else 'manual'}.")
+                    st.success(f"➕ {len(nv)} punto(s) nuevo(s): {len(nv) - n_pend} asignado(s), "
+                               f"**{n_pend} sin asignar** (grises en el mapa).")
 
-    clusters = sorted(d["cluster"].unique(), key=_visor_ckey)
+    # Grupos "reales" (excluye los puntos aún sin asignar)
+    clusters = sorted([c for c in d["cluster"].unique() if c != _VISOR_SIN], key=_visor_ckey)
+    pend = d[d["cluster"] == _VISOR_SIN]
 
     # =================================================================
     # PASO ④ — Re-optimizar el orden (opcional, usa OR-Tools)
@@ -556,7 +597,8 @@ def render_visor_resultado():
     reopt_on = st.checkbox("🔁 Re-optimizar el orden de visita con OR-Tools",
                            key="visor_reopt")
     if reopt_on:
-        grupos_nuevos = sorted(d[d["nuevo"]]["cluster"].unique(), key=_visor_ckey)
+        grupos_nuevos = sorted(d[d["nuevo"] & (d["cluster"] != _VISOR_SIN)]["cluster"].unique(),
+                               key=_visor_ckey)
         r1, r2, r3 = st.columns(3)
         alcance = r1.radio("Qué re-optimizar",
                            ["Solo grupos con puntos nuevos", "Todas las rutas"],
@@ -623,13 +665,15 @@ def render_visor_resultado():
     color_de = {c: paleta[i % len(paleta)] for i, c in enumerate(clusters)}
     dv = d[d["cluster"].isin(sel)]
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("🏪 Tiendas", len(dv))
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("🏪 Asignadas", len(dv))
     k2.metric("🗂️ Grupos", dv["cluster"].nunique())
     k3.metric("📦 Bultos", int(dv["bultos"].sum()))
-    k4.metric("🆕 Nuevos", int(dv["nuevo"].sum()))
+    k4.metric("🆕 Nuevas", int(dv["nuevo"].sum()))
+    k5.metric("🕓 Sin asignar", len(pend))
 
-    m = folium.Map(location=[dv["lat"].mean(), dv["lon"].mean()],
+    MAGENTA = "#E5007A"
+    m = folium.Map(location=[d["lat"].mean(), d["lon"].mean()],
                    zoom_start=13, tiles=estilo, control_scale=True)
     Fullscreen(position="topleft", title="Pantalla completa",
                title_cancel="Salir").add_to(m)
@@ -643,10 +687,17 @@ def render_visor_resultado():
         linea = ([[cd_lat, cd_lon]] + pts + [[cd_lat, cd_lon]]) if usar_cd else pts
         if len(linea) >= 2:
             folium.PolyLine(linea, color=color, weight=4, opacity=0.85).add_to(fg)
+        # Tiendas EXISTENTES agrupadas en clúster (aligera el mapa); las NUEVAS,
+        # en magenta y siempre visibles por encima.
+        cluster_exist = MarkerCluster(
+            options={"maxClusterRadius": 42, "disableClusteringAtZoom": 16},
+            control=False, show=True).add_to(fg)
         for _, r in sub.iterrows():
             num = int(r["orden"]) if r["orden"] else 0
             es_nuevo = bool(r["nuevo"]); prio = int(r["prioridad"]) > 0
-            borde = "#00E5FF" if es_nuevo else ("#FFD700" if prio else "white")
+            fill = MAGENTA if es_nuevo else color
+            borde = "white" if es_nuevo else ("#FFD700" if prio else "white")
+            destino = fg if es_nuevo else cluster_exist
             popup = folium.Popup(
                 f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
                 f"{'🆕 ' if es_nuevo else ''}<b>{r['tienda']}</b><br>Código: {r['codigo']}<br>"
@@ -655,22 +706,42 @@ def render_visor_resultado():
                 f"Lat: {r['lat']:.5f} · Lon: {r['lon']:.5f}</div>", max_width=260)
             tip = ("🆕 " if es_nuevo else "") + ("⭐ " if prio else "") + f"{r['tienda']} · #{num}"
             if num:
+                sz = 28 if es_nuevo else 24
                 folium.Marker(
                     [r["lat"], r["lon"]],
                     icon=folium.DivIcon(
-                        icon_size=(26, 26), icon_anchor=(13, 13),
-                        html=(f"<div style='background:{color};border:3px solid {borde};"
-                              f"border-radius:50%;width:24px;height:24px;display:flex;"
+                        icon_size=(sz + 4, sz + 4), icon_anchor=((sz + 4) // 2, (sz + 4) // 2),
+                        html=(f"<div style='background:{fill};border:3px solid {borde};"
+                              f"border-radius:50%;width:{sz}px;height:{sz}px;display:flex;"
                               f"align-items:center;justify-content:center;color:white;"
                               f"font-weight:bold;font-size:11px;font-family:Arial;"
                               f"box-shadow:0 1px 4px rgba(0,0,0,.5)'>{num}</div>")),
-                    tooltip=tip, popup=popup).add_to(fg)
+                    tooltip=tip, popup=popup).add_to(destino)
             else:
                 folium.CircleMarker(
-                    [r["lat"], r["lon"]], radius=6, color=borde, weight=1.5,
-                    fill=True, fill_color=color, fill_opacity=0.95,
-                    tooltip=tip, popup=popup).add_to(fg)
+                    [r["lat"], r["lon"]], radius=7 if es_nuevo else 6, color=borde,
+                    weight=2 if es_nuevo else 1.5, fill=True, fill_color=fill,
+                    fill_opacity=0.95, tooltip=tip, popup=popup).add_to(destino)
         fg.add_to(m)
+
+    # Capa de PENDIENTES (sin asignar): gris, siempre visible y clicable
+    if len(pend):
+        fg_pend = folium.FeatureGroup(name=f"🕓 Sin asignar · {len(pend)}", show=True)
+        for _, r in pend.iterrows():
+            folium.CircleMarker(
+                [r["lat"], r["lon"]], radius=9, color="#37474F", weight=2,
+                fill=True, fill_color="#B0BEC5", fill_opacity=0.97,
+                tooltip=f"🕓 SIN ASIGNAR · {r['tienda']} · cód {r['codigo']} "
+                        f"— clic para asignar al grupo activo",
+                popup=folium.Popup(
+                    f"<div style='font-family:Arial;font-size:13px;min-width:200px'>"
+                    f"🕓 <b>{r['tienda']}</b> — <b>SIN ASIGNAR</b><br>"
+                    f"Código: {r['codigo']}<br>Bultos: {int(r['bultos'])}<br>"
+                    f"<b>Clic aquí para asignarlo al grupo activo"
+                    f"{'' if grupo_activo is None else ' (' + str(grupo_activo) + ')'}</b></div>",
+                    max_width=260)).add_to(fg_pend)
+        fg_pend.add_to(m)
+
     if usar_cd:
         folium.Marker(
             [cd_lat, cd_lon],
@@ -681,13 +752,27 @@ def render_visor_resultado():
         ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     try:
-        lats_b = list(dv["lat"]) + ([cd_lat] if usar_cd else [])
-        lons_b = list(dv["lon"]) + ([cd_lon] if usar_cd else [])
+        lats_b = list(dv["lat"]) + list(pend["lat"]) + ([cd_lat] if usar_cd else [])
+        lons_b = list(dv["lon"]) + list(pend["lon"]) + ([cd_lon] if usar_cd else [])
         m.fit_bounds([[min(lats_b), min(lons_b)], [max(lats_b), max(lons_b)]])
     except Exception:
         pass
-    st_folium(m, height=620, use_container_width=True,
-              returned_objects=[], key="visor_map")
+    salida = st_folium(m, height=620, use_container_width=True,
+                       returned_objects=["last_object_clicked"], key="visor_map")
+
+    # Clic en un punto GRIS (sin asignar) -> asignarlo al grupo activo
+    clic = (salida or {}).get("last_object_clicked")
+    if clic and grupo_activo is not None and len(pend):
+        kkey = (round(float(clic["lat"]), 6), round(float(clic["lng"]), 6))
+        if st.session_state.get("visor_last_click") != kkey:
+            st.session_state["visor_last_click"] = kkey
+            match = pend[(pend["lat"].round(6) == kkey[0]) & (pend["lon"].round(6) == kkey[1])]
+            if not match.empty:
+                row = match.iloc[0]
+                st.session_state["visor_asig"][
+                    _visor_clave(row["codigo"], row["lat"], row["lon"])] = grupo_activo
+                st.session_state.pop("visor_edit_grupos", None)
+                st.rerun()
 
     # =================================================================
     # PASO ⑥ — Resumen, detalle y descarga del resultado actualizado
@@ -713,7 +798,7 @@ def render_visor_resultado():
 
     d2 = d.sort_values(["cluster", "orden"])
     export = pd.DataFrame({
-        "Cluster": d2["cluster"], "Orden": d2["orden"].astype(int),
+        "Cluster": d2["cluster"].replace(_VISOR_SIN, ""), "Orden": d2["orden"].astype(int),
         "Código": d2["codigo"], "Tienda": d2["tienda"], "Distrito": d2["distrito"],
         "Bultos": d2["bultos"].astype(int), "Prioridad": d2["prioridad"].astype(int),
         "Llegada (ETA)": d2["eta"], "Latitud": d2["lat"].round(6),
