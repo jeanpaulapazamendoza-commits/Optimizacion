@@ -2046,300 +2046,339 @@ paletas = {
 }
 colores = paletas[paleta_colores]  # hex o 'rgb(r,g,b)': ambos son CSS válidos para Folium
 
-m = folium.Map(
-    location=[center_lat, center_lon],
-    zoom_start=zoom_calc,
-    tiles=estilo_mapa,
-    control_scale=True
-)
+@st.fragment
+def _render_mapa(_no_asig=no_asignadas, _n_no_asig=n_no_asignadas,
+                 _df_cent=df_centroides, _clus_vis=clusters_visibles):
+    # OPTIMIZACION: el mapa vive en un st.fragment. En modo manual, dibujar/clicar
+    # re-ejecuta SOLO este fragment (no las ~3000 lineas del script), recalculando
+    # la seleccion fresca desde session_state -> interaccion mucho mas fluida.
+    if modo_manual:
+        _lbl = np.full(n_tiendas, -1, dtype=int)
+        _k = 0
+        for _conj in st.session_state.grupos_manual:
+            if _conj:
+                for _ip in _conj:
+                    _lbl[_ip] = _k
+                _k += 1
+        df["cluster"] = _lbl.astype(str)
+        no_asignadas = df[df["cluster"] == "-1"]
+        n_no_asignadas = len(no_asignadas)
+        df_centroides = (df[df["cluster"] != "-1"].groupby("cluster")
+                         .agg(latitud=("latitud", "mean"), longitud=("longitud", "mean"))
+                         .reset_index())
+        df_centroides["cluster_num"] = df_centroides["cluster"].astype(int)
+        df_centroides = df_centroides.sort_values("cluster_num").reset_index(drop=True)
+        clusters_visibles = list(range(_k))
+    else:
+        no_asignadas, n_no_asignadas = _no_asig, _n_no_asig
+        df_centroides, clusters_visibles = _df_cent, _clus_vis
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_calc,
+        tiles=estilo_mapa,
+        control_scale=True
+    )
 
-# Herramientas profesionales dentro del mapa
-Fullscreen(position="topleft", title="Pantalla completa", title_cancel="Salir").add_to(m)
-MeasureControl(position="topleft", primary_length_unit="kilometers",
-               secondary_length_unit="meters").add_to(m)
-MiniMap(toggle_display=True, position="bottomright", zoom_level_offset=-5).add_to(m)
+    # Herramientas profesionales dentro del mapa
+    Fullscreen(position="topleft", title="Pantalla completa", title_cancel="Salir").add_to(m)
+    MeasureControl(position="topleft", primary_length_unit="kilometers",
+                   secondary_length_unit="meters").add_to(m)
+    MiniMap(toggle_display=True, position="bottomright", zoom_level_offset=-5).add_to(m)
 
-# Capas activables desde el control del propio mapa (esquina superior derecha)
-fg_zonas = folium.FeatureGroup(name="🔲 Zonas de cobertura", show=mostrar_zonas)
-fg_rutas = folium.FeatureGroup(name="🛣️ Rutas óptimas", show=mostrar_rutas_check)
-fg_tiendas = folium.FeatureGroup(name="🏪 Tiendas", show=mostrar_tiendas_check)
-fg_centroides = folium.FeatureGroup(name="📍 Centroides", show=mostrar_centroides)
-fg_noasig = folium.FeatureGroup(name="🚫 No asignadas", show=True)
+    # Capas activables desde el control del propio mapa (esquina superior derecha)
+    fg_zonas = folium.FeatureGroup(name="🔲 Zonas de cobertura", show=mostrar_zonas)
+    fg_rutas = folium.FeatureGroup(name="🛣️ Rutas óptimas", show=mostrar_rutas_check)
+    fg_tiendas = folium.FeatureGroup(name="🏪 Tiendas", show=mostrar_tiendas_check)
+    fg_centroides = folium.FeatureGroup(name="📍 Centroides", show=mostrar_centroides)
+    fg_noasig = folium.FeatureGroup(name="🚫 No asignadas", show=True)
 
-# 0) Tiendas NO asignadas
-if modo_manual:
-    # Modo manual: puntos LIBRES en gris, clicables para asignarlos al grupo activo
-    fg_libres = folium.FeatureGroup(name="🟢 Puntos libres", show=True)
-    for idx, row in no_asignadas.iterrows():
-        folium.CircleMarker(
-            [row["latitud"], row["longitud"]],
-            radius=7, color="#5a5a5a", weight=1.5,
-            fill=True, fill_color="#c9c9c9", fill_opacity=0.9,
-            tooltip=f"🟢 {row['name_sucursal']} · LIBRE · {int(row['cantidad_bultos'])} bultos",
-            popup=folium.Popup(
-                f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
-                f"<b>{row['name_sucursal']}</b><br>"
-                f"Código: {row['codigo_sucursal']}<br>"
-                f"Distrito: {row['distrito']}<br>"
-                f"Bultos: {int(row['cantidad_bultos'])}<br>"
-                f"<b>🟢 Punto libre — clic para asignar al grupo "
-                f"{st.session_state.grupo_activo + 1}</b></div>", max_width=260),
-        ).add_to(fg_libres)
-    fg_libres.add_to(m)
-else:
-    # Modo automático: tiendas sin cupo en la flota -> marcador rojo
-    for idx, row in no_asignadas.iterrows():
-        folium.CircleMarker(
-            [row["latitud"], row["longitud"]],
-            radius=8, color="#d62728", weight=3, dash_array="4",
-            fill=True, fill_color="#ffffff", fill_opacity=0.9,
-            tooltip=f"🚫 {row['name_sucursal']} · SIN RUTA",
-            popup=folium.Popup(
-                f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
-                f"<b>🚫 {row['name_sucursal']}</b><br>"
-                f"Código: {row['codigo_sucursal']}<br>"
-                f"Distrito: {row['distrito']}<br>"
-                f"Bultos: {int(row['cantidad_bultos'])}<br>"
-                f"<b>No asignada: sin cupo en la flota</b></div>", max_width=260),
-        ).add_to(fg_noasig)
+    # 0) Tiendas NO asignadas
+    if modo_manual:
+        # Modo manual: puntos LIBRES en gris, clicables para asignarlos al grupo activo
+        fg_libres = folium.FeatureGroup(name="🟢 Puntos libres", show=True)
+        for idx, row in no_asignadas.iterrows():
+            folium.CircleMarker(
+                [row["latitud"], row["longitud"]],
+                radius=7, color="#5a5a5a", weight=1.5,
+                fill=True, fill_color="#c9c9c9", fill_opacity=0.9,
+                tooltip=f"🟢 {row['name_sucursal']} · LIBRE · {int(row['cantidad_bultos'])} bultos",
+                popup=folium.Popup(
+                    f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
+                    f"<b>{row['name_sucursal']}</b><br>"
+                    f"Código: {row['codigo_sucursal']}<br>"
+                    f"Distrito: {row['distrito']}<br>"
+                    f"Bultos: {int(row['cantidad_bultos'])}<br>"
+                    f"<b>🟢 Punto libre — clic para asignar al grupo "
+                    f"{st.session_state.grupo_activo + 1}</b></div>", max_width=260),
+            ).add_to(fg_libres)
+        fg_libres.add_to(m)
+    else:
+        # Modo automático: tiendas sin cupo en la flota -> marcador rojo
+        for idx, row in no_asignadas.iterrows():
+            folium.CircleMarker(
+                [row["latitud"], row["longitud"]],
+                radius=8, color="#d62728", weight=3, dash_array="4",
+                fill=True, fill_color="#ffffff", fill_opacity=0.9,
+                tooltip=f"🚫 {row['name_sucursal']} · SIN RUTA",
+                popup=folium.Popup(
+                    f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
+                    f"<b>🚫 {row['name_sucursal']}</b><br>"
+                    f"Código: {row['codigo_sucursal']}<br>"
+                    f"Distrito: {row['distrito']}<br>"
+                    f"Bultos: {int(row['cantidad_bultos'])}<br>"
+                    f"<b>No asignada: sin cupo en la flota</b></div>", max_width=260),
+            ).add_to(fg_noasig)
 
-# 1) Zonas de cobertura (polígonos convex hull)
-if mostrar_zonas:
-    for i in clusters_visibles:
-        cluster_data = df[df["cluster"] == str(i)]
-        if len(cluster_data) >= 3:
-            puntos = cluster_data[["latitud", "longitud"]].values
-            try:
-                hull = ConvexHull(puntos)
-                hull_pts = puntos[hull.vertices].tolist()
-                color_cluster = colores[i % len(colores)]
-                folium.Polygon(
-                    locations=hull_pts,
-                    color=color_cluster, weight=2,
-                    fill=True, fill_color=color_cluster, fill_opacity=0.12,
-                    tooltip=f"Zona del cluster {i}"
-                ).add_to(fg_zonas)
-            except Exception:
-                pass
+    # 1) Zonas de cobertura (polígonos convex hull)
+    if mostrar_zonas:
+        for i in clusters_visibles:
+            cluster_data = df[df["cluster"] == str(i)]
+            if len(cluster_data) >= 3:
+                puntos = cluster_data[["latitud", "longitud"]].values
+                try:
+                    hull = ConvexHull(puntos)
+                    hull_pts = puntos[hull.vertices].tolist()
+                    color_cluster = colores[i % len(colores)]
+                    folium.Polygon(
+                        locations=hull_pts,
+                        color=color_cluster, weight=2,
+                        fill=True, fill_color=color_cluster, fill_opacity=0.12,
+                        tooltip=f"Zona del cluster {i}"
+                    ).add_to(fg_zonas)
+                except Exception:
+                    pass
 
-# 2) Rutas óptimas (con animación opcional que muestra el sentido del recorrido)
-if rutas_validas:
-    for i, ruta in st.session_state.rutas_calculadas.items():
-        if i not in clusters_visibles:
-            continue
-        color_cluster = colores[i % len(colores)]
-        coords = [(lat, lon) for lat, lon in ruta["coords_route"]]
-        tooltip_ruta = (f"Ruta {i} — {ruta['distance_km']:.1f} km · "
-                        f"{ruta['duration_min']:.0f} min")
-        if animar_rutas:
-            AntPath(coords, color=color_cluster, weight=5, opacity=0.9,
-                    delay=800, dash_array=[12, 24],
-                    tooltip=tooltip_ruta).add_to(fg_rutas)
-        else:
-            folium.PolyLine(coords, color=color_cluster, weight=4, opacity=0.9,
-                            tooltip=tooltip_ruta).add_to(fg_rutas)
-
-# 3) Tiendas (con cluster de marcadores opcional para datasets grandes)
-if agrupar_marcadores:
-    contenedor_tiendas = MarkerCluster(
-        options={"maxClusterRadius": 45, "disableClusteringAtZoom": 15}
-    ).add_to(fg_tiendas)
-else:
-    contenedor_tiendas = fg_tiendas
-
-if mostrar_tiendas_check:
-    for i in clusters_visibles:
-        cluster_data = df[df["cluster"] == str(i)]
-        if len(cluster_data) == 0:
-            continue
-        color_cluster = colores[i % len(colores)]
-
-        tiene_orden = (rutas_validas and mostrar_numeros_orden
-                       and i in st.session_state.rutas_calculadas)
-        mapa_orden = {}
-        if tiene_orden:
-            orden = st.session_state.rutas_calculadas[i]["orden"]
-            mapa_orden = {idx_global: pos + 1 for pos, idx_global in enumerate(orden)}
-
-        for idx, row in cluster_data.iterrows():
-            num = mapa_orden.get(idx, 0)
-            es_prioritaria = int(row["prioridad"]) > 0
-            orden_txt = f"<br>Orden de visita: <b>#{num}</b>" if num else ""
-            prior_txt = (f"<br>⭐ <b>Prioridad: nivel {int(row['prioridad'])}</b>"
-                         if es_prioritaria else "")
-            eta_txt = ""
-            if rutas_validas and i in st.session_state.rutas_calculadas:
-                eta_v = st.session_state.rutas_calculadas[i].get("etas", {}).get(idx)
-                if eta_v is not None:
-                    eta_txt = f"<br>🕐 Llegada estimada: <b>{segundos_a_hora(eta_v)}</b>"
-            vent_txt = ""
-            if pd.notna(row["ventana_ini_s"]) and pd.notna(row["ventana_fin_s"]):
-                vent_txt = (f"<br>⏰ Ventana: {segundos_a_hora(row['ventana_ini_s'])}"
-                            f"-{segundos_a_hora(row['ventana_fin_s'])}")
-            popup_html = (
-                f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
-                f"<b>{row['name_sucursal']}</b><br>"
-                f"Código: {row['codigo_sucursal']}<br>"
-                f"Distrito: {row['distrito']}<br>"
-                f"Bultos: {int(row['cantidad_bultos'])}{prior_txt}{vent_txt}{eta_txt}<br>"
-                f"Cluster: {i}{orden_txt}<br>"
-                f"Lat: {row['latitud']:.5f} · Lon: {row['longitud']:.5f}</div>"
-            )
-            tooltip_txt = (("⭐ " if es_prioritaria else "") + f"{row['name_sucursal']}"
-                           + (f" · #{num}" if num else ""))
-            borde = "#FFD700" if es_prioritaria else "white"
-            if num:
-                # Badge numerado con el color del cluster (borde dorado = prioritaria)
-                folium.Marker(
-                    [row["latitud"], row["longitud"]],
-                    icon=folium.DivIcon(
-                        icon_size=(26, 26), icon_anchor=(13, 13),
-                        html=(
-                            f"<div style='background:{color_cluster};"
-                            f"border:3px solid {borde};border-radius:50%;"
-                            f"width:24px;height:24px;display:flex;align-items:center;"
-                            f"justify-content:center;color:white;font-weight:bold;"
-                            f"font-size:11px;font-family:Arial;"
-                            f"box-shadow:0 1px 4px rgba(0,0,0,.5)'>{num}</div>"
-                        )
-                    ),
-                    tooltip=tooltip_txt,
-                    popup=folium.Popup(popup_html, max_width=260),
-                ).add_to(contenedor_tiendas)
+    # 2) Rutas óptimas (con animación opcional que muestra el sentido del recorrido)
+    if rutas_validas:
+        for i, ruta in st.session_state.rutas_calculadas.items():
+            if i not in clusters_visibles:
+                continue
+            color_cluster = colores[i % len(colores)]
+            coords = [(lat, lon) for lat, lon in ruta["coords_route"]]
+            tooltip_ruta = (f"Ruta {i} — {ruta['distance_km']:.1f} km · "
+                            f"{ruta['duration_min']:.0f} min")
+            if animar_rutas:
+                AntPath(coords, color=color_cluster, weight=5, opacity=0.9,
+                        delay=800, dash_array=[12, 24],
+                        tooltip=tooltip_ruta).add_to(fg_rutas)
             else:
-                folium.CircleMarker(
-                    [row["latitud"], row["longitud"]],
-                    radius=7 if es_prioritaria else 6,
-                    color=borde, weight=3 if es_prioritaria else 1.5,
-                    fill=True, fill_color=color_cluster, fill_opacity=0.95,
-                    tooltip=tooltip_txt,
-                    popup=folium.Popup(popup_html, max_width=260),
-                ).add_to(contenedor_tiendas)
+                folium.PolyLine(coords, color=color_cluster, weight=4, opacity=0.9,
+                                tooltip=tooltip_ruta).add_to(fg_rutas)
 
-# 4) Centroides
-if mostrar_centroides:
-    cv = df_centroides[df_centroides["cluster_num"].isin(clusters_visibles)]
-    for _, row in cv.iterrows():
-        folium.Marker(
-            [row["latitud"], row["longitud"]],
-            icon=folium.DivIcon(
-                icon_size=(30, 30), icon_anchor=(15, 15),
-                html=(
-                    f"<div style='background:#1a1a1a;border:3px solid white;"
-                    f"border-radius:50%;width:28px;height:28px;display:flex;"
-                    f"align-items:center;justify-content:center;color:white;"
-                    f"font-weight:bold;font-size:10px;font-family:Arial;"
-                    f"box-shadow:0 1px 5px rgba(0,0,0,.6)'>C{int(row['cluster_num'])}</div>"
+    # 3) Tiendas (con cluster de marcadores opcional para datasets grandes)
+    if agrupar_marcadores:
+        contenedor_tiendas = MarkerCluster(
+            options={"maxClusterRadius": 45, "disableClusteringAtZoom": 15}
+        ).add_to(fg_tiendas)
+    else:
+        contenedor_tiendas = fg_tiendas
+
+    if mostrar_tiendas_check:
+        for i in clusters_visibles:
+            cluster_data = df[df["cluster"] == str(i)]
+            if len(cluster_data) == 0:
+                continue
+            color_cluster = colores[i % len(colores)]
+
+            tiene_orden = (rutas_validas and mostrar_numeros_orden
+                           and i in st.session_state.rutas_calculadas)
+            mapa_orden = {}
+            if tiene_orden:
+                orden = st.session_state.rutas_calculadas[i]["orden"]
+                mapa_orden = {idx_global: pos + 1 for pos, idx_global in enumerate(orden)}
+
+            for idx, row in cluster_data.iterrows():
+                num = mapa_orden.get(idx, 0)
+                es_prioritaria = int(row["prioridad"]) > 0
+                orden_txt = f"<br>Orden de visita: <b>#{num}</b>" if num else ""
+                prior_txt = (f"<br>⭐ <b>Prioridad: nivel {int(row['prioridad'])}</b>"
+                             if es_prioritaria else "")
+                eta_txt = ""
+                if rutas_validas and i in st.session_state.rutas_calculadas:
+                    eta_v = st.session_state.rutas_calculadas[i].get("etas", {}).get(idx)
+                    if eta_v is not None:
+                        eta_txt = f"<br>🕐 Llegada estimada: <b>{segundos_a_hora(eta_v)}</b>"
+                vent_txt = ""
+                if pd.notna(row["ventana_ini_s"]) and pd.notna(row["ventana_fin_s"]):
+                    vent_txt = (f"<br>⏰ Ventana: {segundos_a_hora(row['ventana_ini_s'])}"
+                                f"-{segundos_a_hora(row['ventana_fin_s'])}")
+                popup_html = (
+                    f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
+                    f"<b>{row['name_sucursal']}</b><br>"
+                    f"Código: {row['codigo_sucursal']}<br>"
+                    f"Distrito: {row['distrito']}<br>"
+                    f"Bultos: {int(row['cantidad_bultos'])}{prior_txt}{vent_txt}{eta_txt}<br>"
+                    f"Cluster: {i}{orden_txt}<br>"
+                    f"Lat: {row['latitud']:.5f} · Lon: {row['longitud']:.5f}</div>"
                 )
-            ),
-            tooltip=f"Centroide del cluster {int(row['cluster_num'])}",
-        ).add_to(fg_centroides)
+                tooltip_txt = (("⭐ " if es_prioritaria else "") + f"{row['name_sucursal']}"
+                               + (f" · #{num}" if num else ""))
+                borde = "#FFD700" if es_prioritaria else "white"
+                if num:
+                    # Badge numerado con el color del cluster (borde dorado = prioritaria)
+                    folium.Marker(
+                        [row["latitud"], row["longitud"]],
+                        icon=folium.DivIcon(
+                            icon_size=(26, 26), icon_anchor=(13, 13),
+                            html=(
+                                f"<div style='background:{color_cluster};"
+                                f"border:3px solid {borde};border-radius:50%;"
+                                f"width:24px;height:24px;display:flex;align-items:center;"
+                                f"justify-content:center;color:white;font-weight:bold;"
+                                f"font-size:11px;font-family:Arial;"
+                                f"box-shadow:0 1px 4px rgba(0,0,0,.5)'>{num}</div>"
+                            )
+                        ),
+                        tooltip=tooltip_txt,
+                        popup=folium.Popup(popup_html, max_width=260),
+                    ).add_to(contenedor_tiendas)
+                else:
+                    folium.CircleMarker(
+                        [row["latitud"], row["longitud"]],
+                        radius=7 if es_prioritaria else 6,
+                        color=borde, weight=3 if es_prioritaria else 1.5,
+                        fill=True, fill_color=color_cluster, fill_opacity=0.95,
+                        tooltip=tooltip_txt,
+                        popup=folium.Popup(popup_html, max_width=260),
+                    ).add_to(contenedor_tiendas)
 
-# 5) Centro de Distribución (siempre visible)
-folium.Marker(
-    [cd_lat, cd_lon],
-    icon=folium.Icon(color="black", icon="industry", prefix="fa"),
-    tooltip="🏭 Centro de Distribución (punto de partida)",
-    popup=folium.Popup(
-        f"<b>🏭 Centro de Distribución</b><br>Lat: {cd_lat:.5f}<br>Lon: {cd_lon:.5f}",
-        max_width=220
-    ),
-).add_to(m)
+    # 4) Centroides
+    if mostrar_centroides:
+        cv = df_centroides[df_centroides["cluster_num"].isin(clusters_visibles)]
+        for _, row in cv.iterrows():
+            folium.Marker(
+                [row["latitud"], row["longitud"]],
+                icon=folium.DivIcon(
+                    icon_size=(30, 30), icon_anchor=(15, 15),
+                    html=(
+                        f"<div style='background:#1a1a1a;border:3px solid white;"
+                        f"border-radius:50%;width:28px;height:28px;display:flex;"
+                        f"align-items:center;justify-content:center;color:white;"
+                        f"font-weight:bold;font-size:10px;font-family:Arial;"
+                        f"box-shadow:0 1px 5px rgba(0,0,0,.6)'>C{int(row['cluster_num'])}</div>"
+                    )
+                ),
+                tooltip=f"Centroide del cluster {int(row['cluster_num'])}",
+            ).add_to(fg_centroides)
 
-for fg in (fg_zonas, fg_rutas, fg_tiendas, fg_centroides):
-    fg.add_to(m)
-if n_no_asignadas:
-    fg_noasig.add_to(m)
-folium.LayerControl(position="topright", collapsed=False).add_to(m)
-
-if modo_manual:
-    # Herramientas de dibujo (rectángulo/polígono) para seleccionar por sectores
-    Draw(
-        draw_options={"polyline": False, "circle": False, "marker": False,
-                      "circlemarker": False,
-                      "rectangle": {"shapeOptions": {"color": "#F2A33C",
-                                                     "fillOpacity": 0.12}},
-                      "polygon": {"shapeOptions": {"color": "#F2A33C",
-                                                   "fillOpacity": 0.12},
-                                  "allowIntersection": False}},
-        edit_options={"edit": False, "remove": True},
-        position="topleft",
+    # 5) Centro de Distribución (siempre visible)
+    folium.Marker(
+        [cd_lat, cd_lon],
+        icon=folium.Icon(color="black", icon="industry", prefix="fa"),
+        tooltip="🏭 Centro de Distribución (punto de partida)",
+        popup=folium.Popup(
+            f"<b>🏭 Centro de Distribución</b><br>Lat: {cd_lat:.5f}<br>Lon: {cd_lon:.5f}",
+            max_width=220
+        ),
     ).add_to(m)
 
-    # Mapa interactivo: capturamos el clic en una tienda para asignar/quitar
-    # y el área dibujada para asignar/liberar sectores completos
-    salida_mapa = st_folium(m, height=680, use_container_width=True,
-                            returned_objects=["last_object_clicked",
-                                              "last_active_drawing"],
-                            key="mapa_manual")
+    for fg in (fg_zonas, fg_rutas, fg_tiendas, fg_centroides):
+        fg.add_to(m)
+    if n_no_asignadas:
+        fg_noasig.add_to(m)
+    folium.LayerControl(position="topright", collapsed=False).add_to(m)
 
-    # --- Selección por ÁREA dibujada (rectángulo o polígono) ---
-    dibujo = (salida_mapa or {}).get("last_active_drawing")
-    if dibujo and (dibujo.get("geometry") or {}).get("type") == "Polygon":
-        anillo = dibujo["geometry"]["coordinates"][0]   # [[lon, lat], ...]
-        g_act = st.session_state.grupo_activo
-        liberar = str(st.session_state.get("accion_dibujo", "")).startswith("➖")
-        # Firma incluye grupo y acción: el mismo trazo vale de nuevo si cambias de grupo
-        firma_d = (g_act, liberar,
-                   tuple((round(float(px), 6), round(float(py), 6)) for px, py in anillo))
-        if st.session_state.get("ultimo_dibujo_manual") != firma_d:
-            st.session_state.ultimo_dibujo_manual = firma_d
-            dentro = puntos_en_poligono(df["latitud"].to_numpy(),
-                                        df["longitud"].to_numpy(), anillo)
-            idx_dentro = set(np.nonzero(dentro)[0].tolist())
-            if idx_dentro:
-                grupos_m = st.session_state.grupos_manual
-                for g in grupos_m:
-                    g.difference_update(idx_dentro)       # fuera de todos los grupos
-                if not liberar:
-                    grupos_m[g_act].update(idx_dentro)    # y dentro del activo
-                st.toast(f"{'➖ Liberadas' if liberar else '➕ Asignadas'} "
-                         f"{len(idx_dentro)} tiendas del sector dibujado.")
-                st.rerun()
+    if modo_manual:
+        # Herramientas de dibujo (rectángulo/polígono) para seleccionar por sectores
+        Draw(
+            draw_options={"polyline": False, "circle": False, "marker": False,
+                          "circlemarker": False,
+                          "rectangle": {"shapeOptions": {"color": "#F2A33C",
+                                                         "fillOpacity": 0.12}},
+                          "polygon": {"shapeOptions": {"color": "#F2A33C",
+                                                       "fillOpacity": 0.12},
+                                      "allowIntersection": False}},
+            edit_options={"edit": False, "remove": True},
+            position="topleft",
+        ).add_to(m)
 
-    # --- Selección por CLIC individual ---
-    clic = (salida_mapa or {}).get("last_object_clicked")
-    if clic and clic.get("lat") is not None:
-        firma = (round(float(clic["lat"]), 6), round(float(clic["lng"]), 6))
-        if st.session_state.get("ultimo_clic_manual") != firma:
-            st.session_state.ultimo_clic_manual = firma
-            _lats = df["latitud"].to_numpy()
-            _lons = df["longitud"].to_numpy()
-            d2 = (_lats - firma[0]) ** 2 + (_lons - firma[1]) ** 2
-            i_sel = int(np.argmin(d2))
-            if d2[i_sel] < (5e-4) ** 2:  # ~50 m: ignora clics que no son una tienda (p.ej. el CD)
-                grupos_m = st.session_state.grupos_manual
-                g_act = st.session_state.grupo_activo
-                if i_sel in grupos_m[g_act]:
-                    grupos_m[g_act].discard(i_sel)        # ya estaba en el activo -> quitar
-                else:
+        # Mapa interactivo: capturamos el clic en una tienda para asignar/quitar
+        # y el área dibujada para asignar/liberar sectores completos
+        salida_mapa = st_folium(m, height=680, use_container_width=True,
+                                returned_objects=["last_object_clicked",
+                                                  "last_active_drawing"],
+                                key="mapa_manual")
+
+        # --- Selección por ÁREA dibujada (rectángulo o polígono) ---
+        dibujo = (salida_mapa or {}).get("last_active_drawing")
+        if dibujo and (dibujo.get("geometry") or {}).get("type") == "Polygon":
+            anillo = dibujo["geometry"]["coordinates"][0]   # [[lon, lat], ...]
+            g_act = st.session_state.grupo_activo
+            liberar = str(st.session_state.get("accion_dibujo", "")).startswith("➖")
+            # Firma incluye grupo y acción: el mismo trazo vale de nuevo si cambias de grupo
+            firma_d = (g_act, liberar,
+                       tuple((round(float(px), 6), round(float(py), 6)) for px, py in anillo))
+            if st.session_state.get("ultimo_dibujo_manual") != firma_d:
+                st.session_state.ultimo_dibujo_manual = firma_d
+                dentro = puntos_en_poligono(df["latitud"].to_numpy(),
+                                            df["longitud"].to_numpy(), anillo)
+                idx_dentro = set(np.nonzero(dentro)[0].tolist())
+                if idx_dentro:
+                    grupos_m = st.session_state.grupos_manual
                     for g in grupos_m:
-                        g.discard(i_sel)                  # sacarla de cualquier otro grupo
-                    grupos_m[g_act].add(i_sel)            # y ponerla en el activo
-                st.rerun()
-else:
-    # returned_objects=[] -> el mapa no fuerza re-ejecuciones al interactuar (más fluido)
-    st_folium(m, height=680, use_container_width=True, returned_objects=[])
+                        g.difference_update(idx_dentro)       # fuera de todos los grupos
+                    if not liberar:
+                        grupos_m[g_act].update(idx_dentro)    # y dentro del activo
+                    st.toast(f"{'➖ Liberadas' if liberar else '➕ Asignadas'} "
+                             f"{len(idx_dentro)} tiendas del sector dibujado.")
+                    st.rerun(scope="fragment")
 
-if modo_manual:
-    g_act = st.session_state.grupo_activo
-    st.caption(f"✋ **Selección manual** — clic en un punto **gris** para asignarlo al "
-               f"**Grupo {g_act + 1}**; clic en uno del grupo activo para quitarlo. "
-               f"⬛ **Dibuja un rectángulo o polígono** (botones a la izquierda del mapa) "
-               f"para seleccionar un sector completo de una vez. "
-               f"Cambia el grupo activo o crea otro en el panel de la izquierda. "
-               f"Usa **🤖 Auto-asignar** para que la herramienta complete los puntos libres.")
-elif modo_enfoque == "aislar":
-    st.caption(f"🎯 **Modo aislado:** Cluster {clusters_visibles[0]}. Cambia el modo en el sidebar.")
-elif modo_enfoque == "solo_rutas":
-    st.caption("🛣️ **Modo solo rutas:** zonas de cobertura ocultas.")
-elif rutas_validas:
-    st.caption("💡 🏭 CD (negro) = punto de partida. **Líneas gruesas** = ruta. **Círculos numerados** = orden de visita.")
-else:
-    st.caption("💡 Calcula las rutas óptimas desde el sidebar para ver el ruteo.")
-st.caption("🧭 Controles del mapa: **capas** (esquina superior derecha), **pantalla completa** y "
-           "**regla de medición** (esquina superior izquierda), minimapa (abajo a la derecha). "
-           "Haz **clic en una tienda** para ver su ficha completa.")
+        # --- Selección por CLIC individual ---
+        clic = (salida_mapa or {}).get("last_object_clicked")
+        if clic and clic.get("lat") is not None:
+            firma = (round(float(clic["lat"]), 6), round(float(clic["lng"]), 6))
+            if st.session_state.get("ultimo_clic_manual") != firma:
+                st.session_state.ultimo_clic_manual = firma
+                _lats = df["latitud"].to_numpy()
+                _lons = df["longitud"].to_numpy()
+                d2 = (_lats - firma[0]) ** 2 + (_lons - firma[1]) ** 2
+                i_sel = int(np.argmin(d2))
+                if d2[i_sel] < (5e-4) ** 2:  # ~50 m: ignora clics que no son una tienda (p.ej. el CD)
+                    grupos_m = st.session_state.grupos_manual
+                    g_act = st.session_state.grupo_activo
+                    if i_sel in grupos_m[g_act]:
+                        grupos_m[g_act].discard(i_sel)        # ya estaba en el activo -> quitar
+                    else:
+                        for g in grupos_m:
+                            g.discard(i_sel)                  # sacarla de cualquier otro grupo
+                        grupos_m[g_act].add(i_sel)            # y ponerla en el activo
+                    st.rerun(scope="fragment")
+
+        # Contador en vivo del grupo activo (se actualiza al instante, sin
+        # re-ejecutar el resto del script)
+        _gm = st.session_state.grupos_manual
+        _ga = st.session_state.grupo_activo
+        _asig = set().union(*_gm) if _gm else set()
+        _c1, _c2, _c3 = st.columns(3)
+        _c1.metric(f"✋ Grupo {_ga + 1} (activo)", f"{len(_gm[_ga])} tiendas")
+        _c2.metric("📦 Bultos del grupo",
+                   int(pesos[list(_gm[_ga])].sum()) if _gm[_ga] else 0)
+        _c3.metric("🟢 Libres / asignadas", f"{n_tiendas - len(_asig)} / {len(_asig)}")
+    else:
+        # returned_objects=[] -> el mapa no fuerza re-ejecuciones al interactuar (más fluido)
+        st_folium(m, height=680, use_container_width=True, returned_objects=[])
+
+    if modo_manual:
+        g_act = st.session_state.grupo_activo
+        st.caption(f"✋ **Selección manual** — clic en un punto **gris** para asignarlo al "
+                   f"**Grupo {g_act + 1}**; clic en uno del grupo activo para quitarlo. "
+                   f"⬛ **Dibuja un rectángulo o polígono** (botones a la izquierda del mapa) "
+                   f"para seleccionar un sector completo de una vez. "
+                   f"Cambia el grupo activo o crea otro en el panel de la izquierda. "
+                   f"Usa **🤖 Auto-asignar** para que la herramienta complete los puntos libres.")
+    elif modo_enfoque == "aislar":
+        st.caption(f"🎯 **Modo aislado:** Cluster {clusters_visibles[0]}. Cambia el modo en el sidebar.")
+    elif modo_enfoque == "solo_rutas":
+        st.caption("🛣️ **Modo solo rutas:** zonas de cobertura ocultas.")
+    elif rutas_validas:
+        st.caption("💡 🏭 CD (negro) = punto de partida. **Líneas gruesas** = ruta. **Círculos numerados** = orden de visita.")
+    else:
+        st.caption("💡 Calcula las rutas óptimas desde el sidebar para ver el ruteo.")
+    st.caption("🧭 Controles del mapa: **capas** (esquina superior derecha), **pantalla completa** y "
+               "**regla de medición** (esquina superior izquierda), minimapa (abajo a la derecha). "
+               "Haz **clic en una tienda** para ver su ficha completa.")
+
+_render_mapa()
 
 # ===========================================================
 # DETALLE DE RUTAS
