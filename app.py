@@ -40,7 +40,7 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
-from folium.plugins import AntPath, Fullscreen, MarkerCluster, MeasureControl, MiniMap
+from folium.plugins import AntPath, Draw, Fullscreen, MarkerCluster, MeasureControl, MiniMap
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from streamlit_folium import st_folium
 from scipy.spatial import ConvexHull
@@ -298,6 +298,24 @@ def matriz_haversine(coords_latlon):
     dlon = lon - lon.T
     a = np.sin(dlat / 2) ** 2 + np.cos(lat) * np.cos(lat.T) * np.sin(dlon / 2) ** 2
     return 2 * R_TIERRA * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def puntos_en_poligono(lats, lons, poligono_lonlat):
+    """Ray casting vectorizado: True por cada punto (lat, lon) dentro del
+    polígono. ``poligono_lonlat`` viene del GeoJSON de Leaflet.draw como
+    [[lon, lat], ...] (anillo exterior)."""
+    poly = np.asarray(poligono_lonlat, dtype=float)
+    px, py = poly[:, 0], poly[:, 1]                     # lon, lat de vértices
+    x = np.asarray(lons, dtype=float)
+    y = np.asarray(lats, dtype=float)
+    dentro = np.zeros(x.shape, dtype=bool)
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        cruza = ((py[i] > y) != (py[j] > y)) & (
+            x < (px[j] - px[i]) * (y - py[i]) / (py[j] - py[i] + 1e-300) + px[i])
+        dentro ^= cruza
+        j = i
+    return dentro
 
 
 # ===========================================================
@@ -1487,6 +1505,7 @@ elif modo_cluster == "manual":
         st.session_state.grupos_manual = [set()]
         st.session_state.grupo_activo = 0
         st.session_state.ultimo_clic_manual = None
+        st.session_state.ultimo_dibujo_manual = None
 
     grupos_m = st.session_state.grupos_manual
     # saneamiento por si quedó vacío
@@ -1496,8 +1515,17 @@ elif modo_cluster == "manual":
     st.session_state.grupo_activo = min(st.session_state.grupo_activo, len(grupos_m) - 1)
 
     st.sidebar.caption("Haz **clic en una tienda** del mapa para asignarla al grupo "
-                       "activo. Clic de nuevo para quitarla. Los puntos **grises** "
-                       "están libres.")
+                       "activo (clic de nuevo para quitarla), o **dibuja un área** "
+                       "(⬛ rectángulo / ⬠ polígono, botones a la izquierda del mapa) "
+                       "para seleccionar **todo un sector de golpe**. Los puntos "
+                       "**grises** están libres.")
+
+    accion_dibujo = st.sidebar.radio(
+        "Al dibujar un área:",
+        ["➕ Asignar el sector al grupo activo", "➖ Liberar el sector (quitar de todos)"],
+        key="accion_dibujo",
+        help="Dibuja un rectángulo o polígono sobre el mapa: todas las tiendas "
+             "dentro del área se asignan al grupo activo, o se liberan si eliges quitar.")
 
     opciones_g = list(range(len(grupos_m)))
     st.session_state.grupo_activo = st.sidebar.selectbox(
@@ -2225,10 +2253,51 @@ if n_no_asignadas:
 folium.LayerControl(position="topright", collapsed=False).add_to(m)
 
 if modo_manual:
+    # Herramientas de dibujo (rectángulo/polígono) para seleccionar por sectores
+    Draw(
+        draw_options={"polyline": False, "circle": False, "marker": False,
+                      "circlemarker": False,
+                      "rectangle": {"shapeOptions": {"color": "#F2A33C",
+                                                     "fillOpacity": 0.12}},
+                      "polygon": {"shapeOptions": {"color": "#F2A33C",
+                                                   "fillOpacity": 0.12},
+                                  "allowIntersection": False}},
+        edit_options={"edit": False, "remove": True},
+        position="topleft",
+    ).add_to(m)
+
     # Mapa interactivo: capturamos el clic en una tienda para asignar/quitar
+    # y el área dibujada para asignar/liberar sectores completos
     salida_mapa = st_folium(m, height=680, use_container_width=True,
-                            returned_objects=["last_object_clicked"],
+                            returned_objects=["last_object_clicked",
+                                              "last_active_drawing"],
                             key="mapa_manual")
+
+    # --- Selección por ÁREA dibujada (rectángulo o polígono) ---
+    dibujo = (salida_mapa or {}).get("last_active_drawing")
+    if dibujo and (dibujo.get("geometry") or {}).get("type") == "Polygon":
+        anillo = dibujo["geometry"]["coordinates"][0]   # [[lon, lat], ...]
+        g_act = st.session_state.grupo_activo
+        liberar = str(st.session_state.get("accion_dibujo", "")).startswith("➖")
+        # Firma incluye grupo y acción: el mismo trazo vale de nuevo si cambias de grupo
+        firma_d = (g_act, liberar,
+                   tuple((round(float(px), 6), round(float(py), 6)) for px, py in anillo))
+        if st.session_state.get("ultimo_dibujo_manual") != firma_d:
+            st.session_state.ultimo_dibujo_manual = firma_d
+            dentro = puntos_en_poligono(df["latitud"].to_numpy(),
+                                        df["longitud"].to_numpy(), anillo)
+            idx_dentro = set(np.nonzero(dentro)[0].tolist())
+            if idx_dentro:
+                grupos_m = st.session_state.grupos_manual
+                for g in grupos_m:
+                    g.difference_update(idx_dentro)       # fuera de todos los grupos
+                if not liberar:
+                    grupos_m[g_act].update(idx_dentro)    # y dentro del activo
+                st.toast(f"{'➖ Liberadas' if liberar else '➕ Asignadas'} "
+                         f"{len(idx_dentro)} tiendas del sector dibujado.")
+                st.rerun()
+
+    # --- Selección por CLIC individual ---
     clic = (salida_mapa or {}).get("last_object_clicked")
     if clic and clic.get("lat") is not None:
         firma = (round(float(clic["lat"]), 6), round(float(clic["lng"]), 6))
@@ -2256,6 +2325,8 @@ if modo_manual:
     g_act = st.session_state.grupo_activo
     st.caption(f"✋ **Selección manual** — clic en un punto **gris** para asignarlo al "
                f"**Grupo {g_act + 1}**; clic en uno del grupo activo para quitarlo. "
+               f"⬛ **Dibuja un rectángulo o polígono** (botones a la izquierda del mapa) "
+               f"para seleccionar un sector completo de una vez. "
                f"Cambia el grupo activo o crea otro en el panel de la izquierda. "
                f"Usa **🤖 Auto-asignar** para que la herramienta complete los puntos libres.")
 elif modo_enfoque == "aislar":
