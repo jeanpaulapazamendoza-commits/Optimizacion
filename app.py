@@ -257,14 +257,201 @@ OSRM_MAX_PUNTOS = 100           # límite del servidor público de OSRM por requ
 ORS_MAX_JOBS = 50               # límite del plan gratuito de ORS (optimization)
 
 # ===========================================================
-# NAVEGACIÓN — Ruteo  /  Conversor direcciones ↔ coordenadas
-# Selector tipo pestañas arriba. Con st.stop() en el modo Conversor evitamos
-# ejecutar todo el pipeline de ruteo cuando no se necesita.
+# VISOR DE RESULTADOS — recuperar la visualización de un ruteo guardado
+# Sube el CSV que exporta la app ("Descargar TODAS las rutas" o "Descargar
+# resultados") y vuelve a ver los grupos y el orden de visita en el mapa,
+# sin recalcular. Útil si la página se recargó y se perdió la vista.
+# ===========================================================
+def render_visor_resultado():
+    st.title("📤 Ver un resultado de ruteo guardado")
+    st.caption(
+        "¿Se te recargó la app y perdiste el mapa? Sube aquí el CSV que "
+        "descargaste del ruteo (botón «Descargar TODAS las rutas» o «Descargar "
+        "resultados») y recupera la vista de tus grupos y su orden de visita. "
+        "Las líneas conectan las tiendas en el orden de reparto (no incluye el "
+        "Centro de Distribución, que no viene en el archivo)."
+    )
+
+    archivo = st.file_uploader(
+        "Sube el CSV del resultado de ruteo", type=["csv"], key="visor_upload")
+    if archivo is None:
+        st.info("⬆️ Sube tu archivo para reconstruir la visualización.")
+        return
+
+    # 1) Leer detectando separador (, o ;) y codificación (utf-8 o latin-1)
+    df_r = None
+    for _enc in ("utf-8-sig", "latin-1"):
+        try:
+            archivo.seek(0)
+            df_r = pd.read_csv(archivo, sep=None, engine="python",
+                               encoding=_enc, on_bad_lines="skip")
+            break
+        except Exception:
+            df_r = None
+    if df_r is None or df_r.empty:
+        st.error("No pude leer el archivo. Asegúrate de que sea el CSV que exporta la app.")
+        return
+
+    # 2) Localizar columnas de forma flexible (tolera nombres/acentos/duplicados)
+    def _buscar(cols, *alias):
+        norm = {str(c).strip().lower(): c for c in cols}
+        for a in alias:
+            if a in norm:
+                return norm[a]
+        return None
+
+    cols = list(df_r.columns)
+    col_cluster = _buscar(cols, "cluster", "grupo")
+    col_orden   = _buscar(cols, "orden")
+    col_codigo  = _buscar(cols, "código", "codigo", "orden.1")
+    col_tienda  = _buscar(cols, "tienda", "name_sucursal", "nombre")
+    col_distr   = _buscar(cols, "distrito")
+    col_bultos  = _buscar(cols, "bultos", "cantidad_bultos")
+    col_prior   = _buscar(cols, "prioridad")
+    col_eta     = _buscar(cols, "llegada (eta)", "llegada", "eta")
+    col_lat     = _buscar(cols, "latitud", "lat")
+    col_lon     = _buscar(cols, "longitud", "lon", "lng", "long")
+
+    faltan = [n for n, c in [("Cluster", col_cluster), ("Latitud", col_lat),
+                             ("Longitud", col_lon)] if c is None]
+    if faltan:
+        st.error(f"Al archivo le faltan columnas obligatorias: {', '.join(faltan)}. "
+                 f"Columnas encontradas: {', '.join(map(str, cols))}")
+        return
+
+    # 3) Normalizar a un dataframe de trabajo
+    d = pd.DataFrame()
+    d["cluster"] = df_r[col_cluster].astype(str).str.strip()
+    d["lat"] = pd.to_numeric(
+        df_r[col_lat].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    d["lon"] = pd.to_numeric(
+        df_r[col_lon].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    d["orden"] = (pd.to_numeric(df_r[col_orden], errors="coerce")
+                  if col_orden else pd.Series(range(1, len(df_r) + 1)))
+    d["tienda"] = df_r[col_tienda].astype(str) if col_tienda else ""
+    d["codigo"] = df_r[col_codigo].astype(str) if col_codigo else ""
+    d["distrito"] = df_r[col_distr].astype(str) if col_distr else ""
+    d["bultos"] = (pd.to_numeric(df_r[col_bultos], errors="coerce").fillna(0).astype(int)
+                   if col_bultos else 0)
+    d["prioridad"] = (pd.to_numeric(df_r[col_prior], errors="coerce").fillna(0).astype(int)
+                      if col_prior else 0)
+    d["eta"] = df_r[col_eta].astype(str) if col_eta else ""
+    d = d.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+    if d.empty:
+        st.error("No encontré coordenadas válidas (Latitud/Longitud) en el archivo.")
+        return
+    d["orden"] = d["orden"].fillna(0)
+
+    def _cluster_key(c):
+        try: return (0, int(float(c)))
+        except Exception: return (1, str(c))
+    clusters = sorted(d["cluster"].unique(), key=_cluster_key)
+
+    # 4) Controles de la vista
+    c1, c2, c3 = st.columns([2, 1, 1])
+    sel = c1.multiselect("Grupos a mostrar", clusters, default=clusters)
+    estilo = c2.selectbox("Mapa base",
+                          ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"])
+    nombre_paleta = c3.selectbox("Paleta", ["Bold", "Vivid", "D3", "Light24", "Plotly"])
+    if not sel:
+        st.warning("Selecciona al menos un grupo para ver el mapa.")
+        return
+    paleta = {"Bold": px.colors.qualitative.Bold, "Vivid": px.colors.qualitative.Vivid,
+              "D3": px.colors.qualitative.D3, "Light24": px.colors.qualitative.Light24,
+              "Plotly": px.colors.qualitative.Plotly}[nombre_paleta]
+    color_de = {c: paleta[i % len(paleta)] for i, c in enumerate(clusters)}
+    dv = d[d["cluster"].isin(sel)]
+
+    # 5) Resumen
+    k1, k2, k3 = st.columns(3)
+    k1.metric("🏪 Tiendas", len(dv))
+    k2.metric("🗂️ Grupos", dv["cluster"].nunique())
+    k3.metric("📦 Bultos", int(dv["bultos"].sum()))
+
+    # 6) Mapa: un FeatureGroup por grupo (activable), línea de ruta + badges numerados
+    m = folium.Map(location=[dv["lat"].mean(), dv["lon"].mean()],
+                   zoom_start=13, tiles=estilo, control_scale=True)
+    Fullscreen(position="topleft", title="Pantalla completa",
+               title_cancel="Salir").add_to(m)
+    for c in clusters:
+        if c not in sel:
+            continue
+        sub = d[d["cluster"] == c].sort_values("orden")
+        color = color_de[c]
+        fg = folium.FeatureGroup(name=f"Grupo {c} · {len(sub)} tiendas", show=True)
+        pts = sub[["lat", "lon"]].values.tolist()
+        if len(pts) >= 2:
+            folium.PolyLine(pts, color=color, weight=4, opacity=0.85).add_to(fg)
+        for _, r in sub.iterrows():
+            num = int(r["orden"]) if r["orden"] else 0
+            prio = int(r["prioridad"]) > 0
+            borde = "#FFD700" if prio else "white"
+            popup = folium.Popup(
+                f"<div style='font-family:Arial;font-size:13px;min-width:190px'>"
+                f"<b>{r['tienda']}</b><br>Código: {r['codigo']}<br>"
+                f"Distrito: {r['distrito']}<br>Bultos: {int(r['bultos'])}<br>"
+                f"🕐 Llegada: <b>{r['eta']}</b><br>Grupo: {c} · Orden: <b>#{num}</b><br>"
+                f"Lat: {r['lat']:.5f} · Lon: {r['lon']:.5f}</div>", max_width=260)
+            tip = ("⭐ " if prio else "") + f"{r['tienda']} · #{num}"
+            if num:
+                folium.Marker(
+                    [r["lat"], r["lon"]],
+                    icon=folium.DivIcon(
+                        icon_size=(26, 26), icon_anchor=(13, 13),
+                        html=(f"<div style='background:{color};border:3px solid {borde};"
+                              f"border-radius:50%;width:24px;height:24px;display:flex;"
+                              f"align-items:center;justify-content:center;color:white;"
+                              f"font-weight:bold;font-size:11px;font-family:Arial;"
+                              f"box-shadow:0 1px 4px rgba(0,0,0,.5)'>{num}</div>")),
+                    tooltip=tip, popup=popup).add_to(fg)
+            else:
+                folium.CircleMarker(
+                    [r["lat"], r["lon"]], radius=6, color=borde, weight=1.5,
+                    fill=True, fill_color=color, fill_opacity=0.95,
+                    tooltip=tip, popup=popup).add_to(fg)
+        fg.add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+    try:
+        m.fit_bounds([[dv["lat"].min(), dv["lon"].min()],
+                      [dv["lat"].max(), dv["lon"].max()]])
+    except Exception:
+        pass
+    st_folium(m, height=620, use_container_width=True,
+              returned_objects=[], key="visor_map")
+
+    # 7) Resumen por grupo + detalle
+    dv_ord = dv.sort_values(["cluster", "orden"])
+    resumen = (dv_ord.groupby("cluster")
+               .agg(Tiendas=("tienda", "size"), Bultos=("bultos", "sum"),
+                    ETA_inicio=("eta", "first"), ETA_fin=("eta", "last"))
+               .reindex([c for c in clusters if c in sel]).reset_index()
+               .rename(columns={"cluster": "Grupo", "ETA_inicio": "ETA inicio",
+                                "ETA_fin": "ETA fin"}))
+    st.markdown("#### Resumen por grupo")
+    st.dataframe(resumen, use_container_width=True, hide_index=True)
+    with st.expander("📋 Ver detalle completo (todas las tiendas)"):
+        st.dataframe(
+            dv_ord.rename(columns={
+                "cluster": "Grupo", "orden": "Orden", "tienda": "Tienda",
+                "codigo": "Código", "distrito": "Distrito", "bultos": "Bultos",
+                "prioridad": "Prioridad", "eta": "Llegada (ETA)",
+                "lat": "Latitud", "lon": "Longitud"}),
+            use_container_width=True, hide_index=True)
+
+
+# ===========================================================
+# NAVEGACIÓN — Ruteo / Conversor / Visor de resultados
+# Selector tipo pestañas arriba. Con st.stop() en los modos que no son Ruteo
+# evitamos ejecutar todo el pipeline de ruteo cuando no se necesita.
 # ===========================================================
 _NAV_RUTEO = "🚛 Ruteo y clustering"
 _NAV_CONV = "🌎 Conversor direcciones ↔ coordenadas"
+_NAV_VISOR = "📤 Ver resultado guardado"
+_opciones_nav = [_NAV_RUTEO]
 if CONVERSOR_DISPONIBLE:
-    _opciones_nav = [_NAV_RUTEO, _NAV_CONV]
+    _opciones_nav.append(_NAV_CONV)
+_opciones_nav.append(_NAV_VISOR)
+if len(_opciones_nav) > 1:
     try:
         _nav = st.segmented_control(
             "Navegación", _opciones_nav, default=_NAV_RUTEO,
@@ -274,6 +461,9 @@ if CONVERSOR_DISPONIBLE:
                         label_visibility="collapsed")
     if _nav == _NAV_CONV:
         render_conversor()
+        st.stop()
+    elif _nav == _NAV_VISOR:
+        render_visor_resultado()
         st.stop()
 
 # ===========================================================
