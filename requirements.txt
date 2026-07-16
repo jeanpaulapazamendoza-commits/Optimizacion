@@ -1,4 +1,9 @@
-streamlit
+# Versiones fijadas del stack de Streamlit = exactamente las que funcionan en local.
+# (Sin fijar, Render instalaba la última y el frontend no cargaba.)
+streamlit==1.57.0
+streamlit-folium==0.26.2
+streamlit-authenticator==0.4.2
+folium==0.20.0
 pandas
 numpy
 scikit-learn
@@ -8,9 +13,6 @@ scipy
 openrouteservice
 ortools
 requests
-folium
-streamlit-folium
 qrcode
 gspread
 google-auth
-streamlit-authenticator
