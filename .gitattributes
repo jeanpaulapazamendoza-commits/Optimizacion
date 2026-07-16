@@ -1,0 +1,5 @@
+# Los scripts .sh y el entrypoint DEBEN usar saltos de línea LF (Linux),
+# aunque se editen en Windows. Con CRLF el contenedor no arranca.
+*.sh    text eol=lf
+entrypoint.sh text eol=lf
+Dockerfile   text eol=lf

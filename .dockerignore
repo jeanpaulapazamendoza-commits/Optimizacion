@@ -1,0 +1,27 @@
+# Lo que NO debe entrar a la imagen Docker
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# SECRETOS: nunca hornear credenciales dentro de la imagen.
+# En la nube se inyectan aparte (Secret File / variable de entorno).
+.streamlit/secrets.toml
+
+# Logs y temporales
+*.log
+
+# Docs (no hacen falta en runtime)
+*.md
+
+# El propio Dockerfile no necesita copiarse dentro
+Dockerfile
+.dockerignore
