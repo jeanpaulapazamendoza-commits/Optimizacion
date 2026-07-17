@@ -332,7 +332,8 @@ def _visor_plantilla_nuevos_df():
 
 @st.cache_data
 def _visor_plantilla_nuevos_csv():
-    return _visor_plantilla_nuevos_df().to_csv(index=False).encode("utf-8")
+    # utf-8-sig: Excel muestra bien las tildes al abrir el CSV
+    return _visor_plantilla_nuevos_df().to_csv(index=False).encode("utf-8-sig")
 
 
 @st.cache_data
@@ -404,6 +405,8 @@ def render_visor_resultado():
     c_cluster = _visor_buscar(cols, "cluster", "grupo")
     c_orden   = _visor_buscar(cols, "orden")
     c_codigo  = _visor_buscar(cols, "código", "codigo", "orden.1")
+    if c_codigo is None:  # tolera encabezados dañados por Excel ("CÃ³digo")
+        c_codigo = next((c for c in cols if "digo" in str(c).lower()), None)
     c_tienda  = _visor_buscar(cols, "tienda", "name_sucursal", "nombre")
     c_distr   = _visor_buscar(cols, "distrito")
     c_bultos  = _visor_buscar(cols, "bultos", "cantidad_bultos")
@@ -489,7 +492,10 @@ def render_visor_resultado():
                 nv["lat"]       = _visor_num(df_n[nlat])
                 nv["lon"]       = _visor_num(df_n[nlon])
                 _nt = _visor_buscar(nc, "tienda", "name_sucursal", "nombre")
-                _ncod = _visor_buscar(nc, "código", "codigo", "codigo_sucursal")
+                _ncod = _visor_buscar(nc, "código", "codigo", "codigo_sucursal",
+                                      "orden.1", "orden")
+                if _ncod is None:  # tolera encabezados dañados por Excel ("CÃ³digo")
+                    _ncod = next((c for c in nc if "digo" in str(c).lower()), None)
                 _ndis = _visor_buscar(nc, "distrito")
                 _nbul = _visor_buscar(nc, "bultos", "cantidad_bultos")
                 _npri = _visor_buscar(nc, "prioridad")
@@ -506,6 +512,15 @@ def render_visor_resultado():
                 if nv.empty:
                     st.warning("El archivo de puntos nuevos no tiene coordenadas válidas.")
                 else:
+                    # Corrección: si "Tienda" trae un número largo (típico: el código
+                    # en la columna equivocada) y no vino código, lo movemos a Código.
+                    _esnum = nv["tienda"].astype(str).str.strip().str.fullmatch(r"\d{8,}")
+                    _sincod = nv["codigo"].astype(str).str.strip().isin(["", "nan", "None"])
+                    _mover = _esnum.fillna(False) & _sincod
+                    if _mover.any():
+                        nv.loc[_mover, "codigo"] = nv.loc[_mover, "tienda"].astype(str).str.strip()
+                        nv.loc[_mover, "tienda"] = "(sin nombre)"
+
                     grupos_base = sorted(d["cluster"].unique(), key=_visor_ckey)
                     # Nombres vacíos -> "(sin nombre)" (así no sale "None")
                     _mal = nv["tienda"].astype(str).str.strip().str.lower()
@@ -900,11 +915,22 @@ def render_visor_resultado():
         "Bultos": d2["bultos"].astype(int), "Prioridad": d2["prioridad"].astype(int),
         "Llegada (ETA)": d2["eta"], "Latitud": d2["lat"].round(6),
         "Longitud": d2["lon"].round(6)})
-    st.download_button(
+    _xbuf = BytesIO()
+    with pd.ExcelWriter(_xbuf, engine="openpyxl") as _w:
+        export.to_excel(_w, index=False, sheet_name="ruteo")
+    dd1, dd2 = st.columns(2)
+    dd1.download_button(
         "⬇️ Descargar resultado actualizado (CSV)",
-        data=export.to_csv(index=False).encode("utf-8"),
-        file_name="ruteo_actualizado.csv", mime="text/csv",
-        help="Guárdalo y vuelve a subirlo aquí para seguir agregando puntos más adelante.")
+        data=export.to_csv(index=False).encode("utf-8-sig"),
+        file_name="ruteo_actualizado.csv", mime="text/csv", use_container_width=True,
+        help="Guárdalo y vuelve a subirlo aquí para seguir agregando puntos más "
+             "adelante. Codificado para que Excel muestre bien las tildes.")
+    dd2.download_button(
+        "📊 Descargar resultado actualizado (Excel)",
+        data=_xbuf.getvalue(), file_name="ruteo_actualizado.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        help="Ideal si lo vas a revisar o editar en Excel: columnas y tildes perfectas.")
 
 
 # ===========================================================
