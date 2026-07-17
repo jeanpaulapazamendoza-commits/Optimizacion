@@ -656,7 +656,7 @@ def render_visor_resultado():
                           key="visor_estilo")
     nombre_paleta = c3.selectbox("Paleta", ["Bold", "Vivid", "D3", "Light24", "Plotly"],
                                  key="visor_paleta")
-    f1, f2, f3 = st.columns([1, 1, 1.6])
+    f1, f2, f3, f4 = st.columns(4)
     mostrar_trazos = f1.checkbox(
         "🛣️ Mostrar trazos de las rutas", value=(len(clusters) <= 6), key="visor_trazos",
         help="Con muchas rutas los trazos tapan el mapa; apágalo para ver solo los "
@@ -665,7 +665,14 @@ def render_visor_resultado():
         "🫧 Agrupar tiendas en burbujas", value=True, key="visor_burbujas",
         help="Apágalo para ver CADA tienda con el color de su grupo (útil para saber "
              "qué grupos rodean a tus puntos nuevos). Con miles de puntos puede ir lento.")
-    buscar = f3.text_input(
+    mostrar_cobertura = f3.checkbox(
+        "🔲 Mostrar cobertura", value=False, key="visor_cobertura",
+        help="Sombrea la zona que abarca cada ruta (polígono con el color del grupo). "
+             "Ideal para ver en qué zona cae un punto nuevo.")
+    mostrar_centroides = f4.checkbox(
+        "📍 Mostrar centroides", value=False, key="visor_centroides",
+        help="Marca el punto medio de cada ruta (C0, C1, …) con el color del grupo.")
+    buscar = st.text_input(
         "🔍 Localizar tienda (código o nombre) — solo la muestra, no modifica nada",
         key="visor_buscar", placeholder="Ej.: 6070826014445 o renelita")
     if not sel:
@@ -715,6 +722,31 @@ def render_visor_resultado():
         linea = ([[cd_lat, cd_lon]] + pts + [[cd_lat, cd_lon]]) if usar_cd else pts
         if mostrar_trazos and len(linea) >= 2:
             folium.PolyLine(linea, color=color, weight=4, opacity=0.85).add_to(fg)
+        # Zona de cobertura del grupo (polígono convex hull, como en el mapa principal)
+        if mostrar_cobertura and len(sub) >= 3:
+            try:
+                puntos = sub[["lat", "lon"]].values
+                hull = ConvexHull(puntos)
+                folium.Polygon(
+                    locations=puntos[hull.vertices].tolist(),
+                    color=color, weight=2, fill=True, fill_color=color,
+                    fill_opacity=0.12, tooltip=f"Cobertura del grupo {c}"
+                ).add_to(fg)
+            except Exception:
+                pass
+        # Centroide del grupo (punto medio, estilo del mapa principal + color de grupo)
+        if mostrar_centroides:
+            folium.Marker(
+                [float(sub["lat"].mean()), float(sub["lon"].mean())],
+                icon=folium.DivIcon(
+                    icon_size=(30, 30), icon_anchor=(15, 15),
+                    html=(f"<div style='background:#1a1a1a;border:3px solid {color};"
+                          f"border-radius:50%;width:28px;height:28px;display:flex;"
+                          f"align-items:center;justify-content:center;color:white;"
+                          f"font-weight:bold;font-size:10px;font-family:Arial;"
+                          f"box-shadow:0 1px 5px rgba(0,0,0,.6)'>C{c}</div>")),
+                tooltip=f"Centroide del grupo {c} · {len(sub)} tiendas",
+            ).add_to(fg)
         # Tiendas EXISTENTES agrupadas en clúster (aligera el mapa); las NUEVAS,
         # en magenta y siempre visibles por encima. Con burbujas apagadas, cada
         # tienda se dibuja directa con el color de su grupo.
