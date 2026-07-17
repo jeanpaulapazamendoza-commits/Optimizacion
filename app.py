@@ -656,9 +656,37 @@ def render_visor_resultado():
                           key="visor_estilo")
     nombre_paleta = c3.selectbox("Paleta", ["Bold", "Vivid", "D3", "Light24", "Plotly"],
                                  key="visor_paleta")
+    f1, f2, f3 = st.columns([1, 1, 1.6])
+    mostrar_trazos = f1.checkbox(
+        "🛣️ Mostrar trazos de las rutas", value=(len(clusters) <= 6), key="visor_trazos",
+        help="Con muchas rutas los trazos tapan el mapa; apágalo para ver solo los "
+             "puntos numerados con el color de su grupo.")
+    agrupar_burbujas = f2.checkbox(
+        "🫧 Agrupar tiendas en burbujas", value=True, key="visor_burbujas",
+        help="Apágalo para ver CADA tienda con el color de su grupo (útil para saber "
+             "qué grupos rodean a tus puntos nuevos). Con miles de puntos puede ir lento.")
+    buscar = f3.text_input(
+        "🔍 Localizar tienda (código o nombre) — solo la muestra, no modifica nada",
+        key="visor_buscar", placeholder="Ej.: 6070826014445 o renelita")
     if not sel:
         st.warning("Selecciona al menos un grupo para ver el mapa.")
         return
+
+    # Búsqueda: encuentra coincidencias en TODO el resultado (incluye sin asignar)
+    matches = pd.DataFrame()
+    if buscar and buscar.strip():
+        q = buscar.strip().lower()
+        matches = d[d["codigo"].astype(str).str.lower().str.contains(q, regex=False)
+                    | d["tienda"].astype(str).str.lower().str.contains(q, regex=False)]
+        if matches.empty:
+            st.warning(f"🔍 No encontré ninguna tienda que coincida con «{buscar.strip()}».")
+        else:
+            _lineas = [f"**{r['codigo']}** · {r['tienda']} → Grupo **{r['cluster']}** · "
+                       f"orden **#{int(r['orden']) if r['orden'] else '—'}** · "
+                       f"ETA {r['eta'] or '—'}"
+                       for _, r in matches.head(5).iterrows()]
+            extra = f" (y {len(matches) - 5} más…)" if len(matches) > 5 else ""
+            st.info(f"🔍 {len(matches)} coincidencia(s):\n\n" + "\n\n".join(_lineas) + extra)
     paleta = {"Bold": px.colors.qualitative.Bold, "Vivid": px.colors.qualitative.Vivid,
               "D3": px.colors.qualitative.D3, "Light24": px.colors.qualitative.Light24,
               "Plotly": px.colors.qualitative.Plotly}[nombre_paleta]
@@ -685,13 +713,17 @@ def render_visor_resultado():
         fg = folium.FeatureGroup(name=f"Grupo {c} · {len(sub)} tiendas", show=True)
         pts = sub[["lat", "lon"]].values.tolist()
         linea = ([[cd_lat, cd_lon]] + pts + [[cd_lat, cd_lon]]) if usar_cd else pts
-        if len(linea) >= 2:
+        if mostrar_trazos and len(linea) >= 2:
             folium.PolyLine(linea, color=color, weight=4, opacity=0.85).add_to(fg)
         # Tiendas EXISTENTES agrupadas en clúster (aligera el mapa); las NUEVAS,
-        # en magenta y siempre visibles por encima.
-        cluster_exist = MarkerCluster(
-            options={"maxClusterRadius": 42, "disableClusteringAtZoom": 16},
-            control=False, show=True).add_to(fg)
+        # en magenta y siempre visibles por encima. Con burbujas apagadas, cada
+        # tienda se dibuja directa con el color de su grupo.
+        if agrupar_burbujas:
+            cluster_exist = MarkerCluster(
+                options={"maxClusterRadius": 42, "disableClusteringAtZoom": 16},
+                control=False, show=True).add_to(fg)
+        else:
+            cluster_exist = fg
         for _, r in sub.iterrows():
             num = int(r["orden"]) if r["orden"] else 0
             es_nuevo = bool(r["nuevo"]); prio = int(r["prioridad"]) > 0
@@ -750,15 +782,48 @@ def render_visor_resultado():
             popup=folium.Popup(f"<b>🏭 Centro de Distribución</b><br>"
                                f"Lat: {cd_lat:.5f}<br>Lon: {cd_lon:.5f}", max_width=220)
         ).add_to(m)
+
+    # Resaltado de búsqueda: anillo rojo pulsante sobre cada coincidencia
+    # (solo visual, no modifica la asignación).
+    if not matches.empty:
+        _pulso = (
+            "<style>@keyframes vpulso{0%{transform:scale(.55);opacity:1}"
+            "100%{transform:scale(1.9);opacity:0}}</style>"
+            "<div style='position:relative;width:46px;height:46px'>"
+            "<div style='position:absolute;inset:0;border:4px solid #FF1744;"
+            "border-radius:50%;animation:vpulso 1.1s ease-out infinite'></div>"
+            "<div style='position:absolute;inset:13px;border:3px solid #FF1744;"
+            "border-radius:50%'></div></div>")
+        for _, r in matches.head(30).iterrows():
+            folium.Marker(
+                [r["lat"], r["lon"]],
+                icon=folium.DivIcon(icon_size=(46, 46), icon_anchor=(23, 23), html=_pulso),
+                tooltip=f"🔍 {r['tienda']} · cód {r['codigo']} · Grupo {r['cluster']} · "
+                        f"#{int(r['orden']) if r['orden'] else '—'}",
+                z_index_offset=10000).add_to(m)
+
     folium.LayerControl(collapsed=False).add_to(m)
     try:
-        lats_b = list(dv["lat"]) + list(pend["lat"]) + ([cd_lat] if usar_cd else [])
-        lons_b = list(dv["lon"]) + list(pend["lon"]) + ([cd_lon] if usar_cd else [])
-        m.fit_bounds([[min(lats_b), min(lons_b)], [max(lats_b), max(lons_b)]])
+        if not matches.empty:
+            # Centrar el mapa en lo buscado (con margen para ver el contexto)
+            mlat, mlon = matches["lat"], matches["lon"]
+            pad = 0.004 if len(matches) == 1 else 0.001
+            m.fit_bounds([[mlat.min() - pad, mlon.min() - pad],
+                          [mlat.max() + pad, mlon.max() + pad]])
+        else:
+            lats_b = list(dv["lat"]) + list(pend["lat"]) + ([cd_lat] if usar_cd else [])
+            lons_b = list(dv["lon"]) + list(pend["lon"]) + ([cd_lon] if usar_cd else [])
+            m.fit_bounds([[min(lats_b), min(lons_b)], [max(lats_b), max(lons_b)]])
     except Exception:
         pass
+    # Si hay búsqueda activa, forzar centro/zoom hacia lo encontrado (st_folium
+    # conserva la vista anterior entre reruns; center/zoom la sobreescriben).
+    _kw = {}
+    if not matches.empty:
+        _kw = {"center": (float(matches["lat"].mean()), float(matches["lon"].mean())),
+               "zoom": 16 if len(matches) == 1 else 14}
     salida = st_folium(m, height=620, use_container_width=True,
-                       returned_objects=["last_object_clicked"], key="visor_map")
+                       returned_objects=["last_object_clicked"], key="visor_map", **_kw)
 
     # Clic en un punto GRIS (sin asignar) -> asignarlo al grupo activo
     clic = (salida or {}).get("last_object_clicked")
