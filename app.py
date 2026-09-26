@@ -47,6 +47,59 @@ from scipy.spatial import ConvexHull
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import davies_bouldin_score, pairwise_distances, silhouette_score
 
+# ===========================================================
+# FONDOS DE MAPA
+#
+# CARTO dejó de servir sus teselas sin clave: ahora responden 200 pero con
+# una imagen que dice "API KEY REQUIRED" en lugar del mapa, así que nada
+# falla a la vista y el mapa sale ilegible. Estos proveedores no piden clave.
+#
+# Ojo con ESRI: ordena las teselas {z}/{y}/{x}, con la y ANTES que la x.
+# Puesto como en OpenStreetMap, el mapa sale descolocado.
+# ===========================================================
+_ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services"
+
+FONDOS_MAPA = {
+    "claro": {
+        "etiqueta": "🌅 Claro (recomendado)",
+        "nombre": "Claro",
+        "url": _ESRI + "/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Esri — World Light Gray Base",
+    },
+    "calle": {
+        "etiqueta": "🗺️ Callejero",
+        "nombre": "Callejero",
+        "url": "OpenStreetMap",
+        "attr": None,
+    },
+    "satelite": {
+        "etiqueta": "🛰️ Satélite",
+        "nombre": "Satélite",
+        "url": _ESRI + "/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Esri — World Imagery",
+    },
+    "oscuro": {
+        "etiqueta": "🌃 Oscuro",
+        "nombre": "Oscuro",
+        "url": _ESRI + "/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Esri — World Dark Gray Base",
+    },
+}
+
+
+def crear_mapa(location, zoom_start, fondo, **kw):
+    """Mapa base con el fondo elegido.
+
+    La capa se añade a mano en vez de pasar `tiles=` a folium.Map porque así
+    el control de capas muestra un nombre legible; con una URL, folium la
+    usaría entera como etiqueta.
+    """
+    f = FONDOS_MAPA.get(fondo) or FONDOS_MAPA["claro"]
+    m = folium.Map(location=location, zoom_start=zoom_start, tiles=None, **kw)
+    folium.TileLayer(tiles=f["url"], attr=f["attr"], name=f["nombre"]).add_to(m)
+    return m
+
+
 try:
     import openrouteservice as ors
     from openrouteservice import convert, optimization
@@ -666,9 +719,9 @@ def render_visor_resultado():
     st.subheader("⑤ Mapa")
     c1, c2, c3 = st.columns([2, 1, 1])
     sel = c1.multiselect("Grupos a mostrar", clusters, default=clusters, key="visor_sel")
-    estilo = c2.selectbox("Mapa base",
-                          ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"],
-                          key="visor_estilo")
+    estilo = c2.selectbox("Mapa base", list(FONDOS_MAPA),
+                          format_func=lambda x: FONDOS_MAPA[x]["etiqueta"],
+                          index=1, key="visor_estilo")
     nombre_paleta = c3.selectbox("Paleta", ["Bold", "Vivid", "D3", "Light24", "Plotly"],
                                  key="visor_paleta")
     f1, f2, f3, f4 = st.columns(4)
@@ -723,8 +776,8 @@ def render_visor_resultado():
     k5.metric("🕓 Sin asignar", len(pend))
 
     MAGENTA = "#E5007A"
-    m = folium.Map(location=[d["lat"].mean(), d["lon"].mean()],
-                   zoom_start=13, tiles=estilo, control_scale=True)
+    m = crear_mapa([d["lat"].mean(), d["lon"].mean()],
+                   zoom_start=13, fondo=estilo, control_scale=True)
     Fullscreen(position="topleft", title="Pantalla completa",
                title_cancel="Salir").add_to(m)
     for c in clusters:
@@ -2555,13 +2608,9 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎨 Estilo del mapa")
 estilo_mapa = st.sidebar.selectbox(
     "Estilo:",
-    options=["CartoDB positron", "OpenStreetMap", "CartoDB dark_matter", "CartoDB voyager"],
-    format_func=lambda x: {
-        "CartoDB positron": "🌅 Claro (recomendado)",
-        "OpenStreetMap": "🗺️ OpenStreetMap",
-        "CartoDB dark_matter": "🌃 Oscuro",
-        "CartoDB voyager": "🧭 Voyager (tonos suaves)"
-    }[x], index=0
+    options=list(FONDOS_MAPA),
+    format_func=lambda x: FONDOS_MAPA[x]["etiqueta"],
+    index=0,
 )
 paleta_colores = st.sidebar.selectbox("Paleta de colores:",
     options=["Vivid", "Bold", "Pastel", "Plotly", "D3", "Light24"], index=0)
@@ -2792,11 +2841,11 @@ def _render_mapa(_no_asig=no_asignadas, _n_no_asig=n_no_asignadas,
     else:
         no_asignadas, n_no_asignadas = _no_asig, _n_no_asig
         df_centroides, clusters_visibles = _df_cent, _clus_vis
-    m = folium.Map(
-        location=[center_lat, center_lon],
+    m = crear_mapa(
+        [center_lat, center_lon],
         zoom_start=zoom_calc,
-        tiles=estilo_mapa,
-        control_scale=True
+        fondo=estilo_mapa,
+        control_scale=True,
     )
 
     # Herramientas profesionales dentro del mapa
